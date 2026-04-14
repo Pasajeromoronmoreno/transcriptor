@@ -1,0 +1,49 @@
+[input]
+push_start_threshold_ms = 300
+tap_timeout_ms = 250
+push_release_window_ms = 150
+# Multiplicador digital del volumen (por defecto 1.0)
+audio_multiplier = 14.0
+
+[groq]
+# Recomendado: guarda la API key en .env como GROQ_API_KEY.
+# Este campo queda como fallback local, pero puede quedar vacio.
+api_key = ""
+language = "es"
+# Prompt para guiar el estilo de Whisper (puntuación y formato correcto)
+whisper_prompt = "Esta es una transcripción en español con puntuación gramatical correcta. Incluye comas, puntos y signos de interrogación para marcar las pausas y el sentido de la conversación."
+experimental_live = true
+
+[output]
+# Copiar la transcripción final al portapapeles
+copy_to_clipboard = true
+# Pegar directamente en el input box activo (vía teclado virtual)
+paste_to_input = true
+# Simular Enter al final del pegado (útil para chatbots)
+auto_enter = true
+# Tiempo de espera (en ms) antes de mandar el Enter para dar tiempo al portapapeles
+auto_enter_delay_ms = 10
+# Asegurar punto final (.)
+add_period = true
+# Exportar la última grabación a audio_exports/last_capture.wav (para debugging/experimentos)
+export_audio = false
+
+[pipeline]
+# "robust" = graba todo, transcribe al final (recomendado)
+# "realtime" = chunking en vivo, experimental
+mode = "robust"
+# Solo para realtime: ventana de chunk en ms
+chunk_window_ms = 800
+
+[hotkeys]
+# Tecla modificadora principal.
+modifier = "KEY_LEFTCTRL"
+# Tecla para iniciar/frenar (combinada con el modificador anterior).
+trigger = "KEY_GRAVE"
+# Tecla para togglear punto/espacio durante la grabación.
+toggle_format = "KEY_LEFTALT"
+# Tecla para stop e INVERTIR el comportamiento de Enter.
+send_with_enter = "KEY_SPACE"
+# Teclas (junto al modificador principal) para subir y bajar ganancia de micrófono.
+increase_gain = "KEY_UP"
+decrease_gain = "KEY_DOWN"

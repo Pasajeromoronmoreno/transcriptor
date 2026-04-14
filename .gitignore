@@ -1,0 +1,13 @@
+/target
+/audio_exports/
+/config.toml
+/config.local.toml
+/.env
+/.env.*
+!/config.example.toml
+!/.env.example
+/experiments/
+/src.zip
+/latency_dashboard.html
+/ideas/
+*.log

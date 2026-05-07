@@ -47,3 +47,10 @@ send_with_enter = "KEY_SPACE"
 # Teclas (junto al modificador principal) para subir y bajar ganancia de micrófono.
 increase_gain = "KEY_UP"
 decrease_gain = "KEY_DOWN"
+
+[dictionary]
+# Diccionario de reemplazos post-transcripción (case-insensitive).
+# Formato: "palabra_mal_transcrita" = "reemplazo_correcto"
+# Podés agregar tantas como quieras.
+# aupe = "AUP"
+# gpt cuatro = "GPT-4"

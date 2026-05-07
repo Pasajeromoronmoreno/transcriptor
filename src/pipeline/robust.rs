@@ -101,6 +101,22 @@ pub async fn run(
 async fn deliver_text(text: &str, config: &AppConfig, add_period: bool, auto_enter: bool) {
     let mut final_text = text.trim().to_string();
 
+    // 0. Diccionario de reemplazos (case-insensitive)
+    for (from, to) in &config.dictionary {
+        let from_lower = from.to_lowercase();
+        // Reemplazo case-insensitive manual (sin regex, sin dependencias extra)
+        let mut result = String::with_capacity(final_text.len());
+        let text_lower = final_text.to_lowercase();
+        let mut last = 0;
+        for (idx, _) in text_lower.match_indices(&from_lower) {
+            result.push_str(&final_text[last..idx]);
+            result.push_str(to);
+            last = idx + from.len();
+        }
+        result.push_str(&final_text[last..]);
+        final_text = result;
+    }
+
     // 1. Lógica de Punto Final
     if add_period {
         if !final_text.ends_with('.') && !final_text.ends_with('?') && !final_text.ends_with('!') {

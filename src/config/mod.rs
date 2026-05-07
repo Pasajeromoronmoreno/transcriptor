@@ -85,6 +85,7 @@ pub struct AppConfig {
     pub hotkey_increase_gain: KeyCode,
     pub hotkey_decrease_gain: KeyCode,
     pub audio_multiplier: f32,
+    pub dictionary: Vec<(String, String)>,
 }
 
 impl Default for AppConfig {
@@ -112,6 +113,7 @@ impl Default for AppConfig {
             hotkey_increase_gain: KeyCode::KEY_UP,
             hotkey_decrease_gain: KeyCode::KEY_DOWN,
             audio_multiplier: 1.0,
+            dictionary: Vec::new(),
         }
     }
 }
@@ -166,6 +168,24 @@ impl AppConfig {
                         if let Some(v) = hot.decrease_gain { if let Some(k) = parse_keycode(&v) { config.hotkey_decrease_gain = k; } }
                     } else {
                         println!("⚠️ No se encontró sección [hotkeys] en el archivo.");
+                    }
+
+                    // Cargar diccionario de reemplazos
+                    if let Some(table) = contents.parse::<toml::Value>().ok()
+                        .and_then(|v| v.get("dictionary").cloned())
+                        .and_then(|v| v.as_table().cloned())
+                    {
+                        let mut dict: Vec<(String, String)> = table.into_iter()
+                            .filter_map(|(k, v)| {
+                                v.as_str().map(|s| (k, s.to_string()))
+                            })
+                            .collect();
+                        // Ordenar por longitud descendente para que reemplazos más largos tengan prioridad
+                        dict.sort_by(|a, b| b.0.len().cmp(&a.0.len()));
+                        if !dict.is_empty() {
+                            println!("📖 Diccionario cargado: {} reemplazos", dict.len());
+                        }
+                        config.dictionary = dict;
                     }
                 }
                 Err(e) => {

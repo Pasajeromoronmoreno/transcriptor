@@ -34,6 +34,8 @@ export_audio = false
 mode = "robust"
 # Solo para realtime: ventana de chunk en ms
 chunk_window_ms = 800
+# Habilitar perfilado de latencia paso a paso en consola
+profile_latency = false
 
 [hotkeys]
 # Tecla modificadora principal.
@@ -49,6 +51,9 @@ increase_gain = "KEY_UP"
 decrease_gain = "KEY_DOWN"
 
 [dictionary]
+# Activar o desactivar por completo el diccionario de reemplazos para comparar performance/lag
+enabled = true
+
 # Diccionario de reemplazos post-transcripción (case-insensitive).
 # Formato: "palabra_mal_transcrita" = "reemplazo_correcto"
 # Podés agregar tantas como quieras.

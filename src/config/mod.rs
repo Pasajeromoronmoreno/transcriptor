@@ -43,6 +43,7 @@ struct OutputToml {
 struct PipelineToml {
     mode: Option<String>,
     chunk_window_ms: Option<u64>,
+    profile_latency: Option<bool>,
 }
 
 #[derive(Deserialize, Debug)]
@@ -78,6 +79,7 @@ pub struct AppConfig {
     pub export_audio: bool,
     pub pipeline_mode: PipelineMode,
     pub chunk_window: Duration,
+    pub profile_latency: bool,
     pub hotkey_modifier: KeyCode,
     pub hotkey_trigger: KeyCode,
     pub hotkey_toggle_format: KeyCode,
@@ -86,6 +88,7 @@ pub struct AppConfig {
     pub hotkey_decrease_gain: KeyCode,
     pub audio_multiplier: f32,
     pub dictionary: Vec<(String, String)>,
+    pub dictionary_enabled: bool,
 }
 
 impl Default for AppConfig {
@@ -106,6 +109,7 @@ impl Default for AppConfig {
             export_audio: false,
             pipeline_mode: PipelineMode::Robust,
             chunk_window: Duration::from_millis(800),
+            profile_latency: false,
             hotkey_modifier: KeyCode::KEY_LEFTCTRL,
             hotkey_trigger: KeyCode::KEY_GRAVE,
             hotkey_toggle_format: KeyCode::KEY_LEFTALT,
@@ -114,6 +118,7 @@ impl Default for AppConfig {
             hotkey_decrease_gain: KeyCode::KEY_DOWN,
             audio_multiplier: 1.0,
             dictionary: Vec::new(),
+            dictionary_enabled: true,
         }
     }
 }
@@ -158,6 +163,7 @@ impl AppConfig {
                             };
                         }
                         if let Some(v) = pipe.chunk_window_ms { config.chunk_window = Duration::from_millis(v); }
+                        if let Some(v) = pipe.profile_latency { config.profile_latency = v; }
                     }
                     if let Some(hot) = t.hotkeys {
                         if let Some(v) = hot.modifier { if let Some(k) = parse_keycode(&v) { config.hotkey_modifier = k; } }
@@ -171,19 +177,27 @@ impl AppConfig {
                     }
 
                     // Cargar diccionario de reemplazos
+                    config.dictionary_enabled = true;
                     if let Some(table) = contents.parse::<toml::Value>().ok()
                         .and_then(|v| v.get("dictionary").cloned())
                         .and_then(|v| v.as_table().cloned())
                     {
+                        if let Some(enabled) = table.get("enabled").and_then(|v| v.as_bool()) {
+                            config.dictionary_enabled = enabled;
+                        }
+
                         let mut dict: Vec<(String, String)> = table.into_iter()
                             .filter_map(|(k, v)| {
+                                if k == "enabled" {
+                                    return None;
+                                }
                                 v.as_str().map(|s| (k, s.to_string()))
                             })
                             .collect();
                         // Ordenar por longitud descendente para que reemplazos más largos tengan prioridad
                         dict.sort_by(|a, b| b.0.len().cmp(&a.0.len()));
                         if !dict.is_empty() {
-                            println!("📖 Diccionario cargado: {} reemplazos", dict.len());
+                            println!("📖 Diccionario cargado: {} reemplazos (Habilitado: {})", dict.len(), config.dictionary_enabled);
                         }
                         config.dictionary = dict;
                     }

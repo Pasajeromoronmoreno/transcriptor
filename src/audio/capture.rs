@@ -104,8 +104,6 @@ impl HotMic {
 
     pub async fn stop_recording(&self) -> Vec<u8> {
         self.is_recording.store(false, Ordering::SeqCst);
-        // Espera mínima física
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         
         let mut b = self.buffer.lock().await;
         let pcm: Vec<u8> = b.drain(..).collect(); // Drenar hasta el último byte

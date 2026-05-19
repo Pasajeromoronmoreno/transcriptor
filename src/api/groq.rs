@@ -1,10 +1,21 @@
 use reqwest::multipart;
 use serde::Deserialize;
 use std::time::Duration;
+use lazy_static::lazy_static;
 
 #[derive(Deserialize)]
 pub struct GroqResponse {
     pub text: String,
+}
+
+lazy_static! {
+    // Creamos un único cliente HTTP con un pool de conexiones persistentes
+    static ref HTTP_CLIENT: reqwest::Client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .pool_max_idle_per_host(10)
+        .pool_idle_timeout(Duration::from_secs(600)) // Mantiene la conexión TLS viva por 10 minutos
+        .build()
+        .unwrap_or_default();
 }
 
 pub async fn transcribe_audio(
@@ -13,8 +24,6 @@ pub async fn transcribe_audio(
     language: &str,
     prompt: Option<&str>,
 ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-    let client = reqwest::Client::new();
-    
     let part = multipart::Part::bytes(wav_data)
         .file_name("chunk.wav")
         .mime_str("audio/wav")?;
@@ -31,10 +40,9 @@ pub async fn transcribe_audio(
         form = form.text("prompt", p.to_string());
     }
 
-    let res = client.post("https://api.groq.com/openai/v1/audio/transcriptions")
+    let res = HTTP_CLIENT.post("https://api.groq.com/openai/v1/audio/transcriptions")
         .bearer_auth(api_key)
         .multipart(form)
-        .timeout(Duration::from_secs(10))
         .send()
         .await?;
 

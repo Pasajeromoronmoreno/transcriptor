@@ -217,8 +217,8 @@ impl AppConfig {
                 }
 
                 // Cargar diccionario de reemplazos
-                config.dictionary_enabled = true;
-                if let Some(table) = contents.parse::<toml::Value>().ok()
+                    config.dictionary_enabled = true;
+                if let Some(table) = toml::from_str::<toml::Value>(contents).ok()
                     .and_then(|v| v.get("dictionary").cloned())
                     .and_then(|v| v.as_table().cloned())
                 {

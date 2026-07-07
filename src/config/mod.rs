@@ -1,6 +1,7 @@
 use serde::Deserialize;
 use std::fs;
 use std::time::Duration;
+use std::path::PathBuf;
 use evdev::KeyCode;
 use std::env;
 
@@ -89,6 +90,7 @@ pub struct AppConfig {
     pub audio_multiplier: f32,
     pub dictionary: Vec<(String, String)>,
     pub dictionary_enabled: bool,
+    pub config_path: Option<PathBuf>,
 }
 
 impl Default for AppConfig {
@@ -119,96 +121,47 @@ impl Default for AppConfig {
             audio_multiplier: 1.0,
             dictionary: Vec::new(),
             dictionary_enabled: true,
+            config_path: None,
         }
     }
 }
 
 impl AppConfig {
-    pub fn load_from_file(path: &str) -> Self {
+    pub fn load_from_file(filename: &str) -> Self {
         let mut config = Self::default();
-        
-        let current_dir = env::current_dir().unwrap_or_default();
-        let full_path = current_dir.join(path);
-        
-        println!("🔍 Buscando configuración en: {:?}", full_path);
 
-        if let Ok(contents) = fs::read_to_string(&full_path) {
-            match toml::from_str::<TomlConfig>(&contents) {
-                Ok(t) => {
-                    if let Some(input) = t.input {
-                        if let Some(v) = input.push_start_threshold_ms { config.push_start_threshold = Duration::from_millis(v); }
-                        if let Some(v) = input.tap_timeout_ms { config.tap_timeout = Duration::from_millis(v); }
-                        if let Some(v) = input.push_release_window_ms { config.push_release_window = Duration::from_millis(v); }
-                        if let Some(v) = input.audio_multiplier { config.audio_multiplier = v; }
-                    }
-                    if let Some(groq) = t.groq {
-                        if let Some(v) = groq.api_key { config.groq_api_key = v; }
-                        if let Some(v) = groq.language { config.groq_language = v; }
-                        if let Some(v) = groq.whisper_prompt { config.whisper_prompt = v; }
-                        if let Some(v) = groq.experimental_live { config.experimental_live = v; }
-                    }
-                    if let Some(out) = t.output {
-                        if let Some(v) = out.copy_to_clipboard { config.copy_to_clipboard = v; }
-                        if let Some(v) = out.paste_to_input { config.paste_to_input = v; }
-                        if let Some(v) = out.auto_enter { config.auto_enter = v; }
-                        if let Some(v) = out.auto_enter_delay_ms { config.auto_enter_delay = Duration::from_millis(v); }
-                        if let Some(v) = out.add_period { config.add_period = v; }
-                        if let Some(v) = out.export_audio { config.export_audio = v; }
-                    }
-                    if let Some(pipe) = t.pipeline {
-                        if let Some(v) = pipe.mode {
-                            config.pipeline_mode = match v.as_str() {
-                                "realtime" => PipelineMode::Realtime,
-                                _ => PipelineMode::Robust,
-                            };
-                        }
-                        if let Some(v) = pipe.chunk_window_ms { config.chunk_window = Duration::from_millis(v); }
-                        if let Some(v) = pipe.profile_latency { config.profile_latency = v; }
-                    }
-                    if let Some(hot) = t.hotkeys {
-                        if let Some(v) = hot.modifier { if let Some(k) = parse_keycode(&v) { config.hotkey_modifier = k; } }
-                        if let Some(v) = hot.trigger { if let Some(k) = parse_keycode(&v) { config.hotkey_trigger = k; } }
-                        if let Some(v) = hot.toggle_format { if let Some(k) = parse_keycode(&v) { config.hotkey_toggle_format = k; } }
-                        if let Some(v) = hot.send_with_enter { if let Some(k) = parse_keycode(&v) { config.hotkey_send_with_enter = k; } }
-                        if let Some(v) = hot.increase_gain { if let Some(k) = parse_keycode(&v) { config.hotkey_increase_gain = k; } }
-                        if let Some(v) = hot.decrease_gain { if let Some(k) = parse_keycode(&v) { config.hotkey_decrease_gain = k; } }
-                    } else {
-                        println!("⚠️ No se encontró sección [hotkeys] en el archivo.");
-                    }
+        let binary_dir = env::current_exe().ok()
+            .and_then(|p| p.parent().map(|p| p.to_path_buf()));
+        let xdg_config = env::var("XDG_CONFIG_HOME").ok()
+            .or_else(|| env::var("HOME").ok().map(|h| format!("{}/.config", h)))
+            .map(|d| PathBuf::from(d).join("transcriptor"));
+        let cwd = env::current_dir().ok();
 
-                    // Cargar diccionario de reemplazos
-                    config.dictionary_enabled = true;
-                    if let Some(table) = contents.parse::<toml::Value>().ok()
-                        .and_then(|v| v.get("dictionary").cloned())
-                        .and_then(|v| v.as_table().cloned())
-                    {
-                        if let Some(enabled) = table.get("enabled").and_then(|v| v.as_bool()) {
-                            config.dictionary_enabled = enabled;
-                        }
+        let search_locations = [
+            binary_dir.as_ref().map(|p| p.join(filename)),
+            xdg_config.as_ref().map(|p| p.join(filename)),
+            cwd.as_ref().map(|p| p.join(filename)),
+        ];
 
-                        let mut dict: Vec<(String, String)> = table.into_iter()
-                            .filter_map(|(k, v)| {
-                                if k == "enabled" {
-                                    return None;
-                                }
-                                v.as_str().map(|s| (k, s.to_string()))
-                            })
-                            .collect();
-                        // Ordenar por longitud descendente para que reemplazos más largos tengan prioridad
-                        dict.sort_by(|a, b| b.0.len().cmp(&a.0.len()));
-                        if !dict.is_empty() {
-                            println!("📖 Diccionario cargado: {} reemplazos (Habilitado: {})", dict.len(), config.dictionary_enabled);
-                        }
-                        config.dictionary = dict;
-                    }
-                }
-                Err(e) => {
-                    eprintln!("❌ Error parseando TOML: {}", e);
+        let mut loaded_path: Option<PathBuf> = None;
+
+        for opt_path in &search_locations {
+            if let Some(path) = opt_path {
+                if let Ok(contents) = fs::read_to_string(path) {
+                    println!("🔍 Configuración cargada desde: {:?}", path);
+                    loaded_path = Some(path.clone());
+
+                    Self::parse_toml(&contents, &mut config);
+                    break;
                 }
             }
-        } else {
-            eprintln!("❌ No se pudo leer el archivo de configuración en {:?}", full_path);
         }
+
+        if loaded_path.is_none() {
+            eprintln!("⚠️ No se encontró archivo de configuración. Usando valores por defecto.");
+        }
+
+        config.config_path = loaded_path;
 
         if let Ok(api_key) = env::var("GROQ_API_KEY") {
             if !api_key.trim().is_empty() {
@@ -219,9 +172,86 @@ impl AppConfig {
         config
     }
 
-    pub fn save_audio_multiplier(path: &str, gain: f32) -> Result<(), std::io::Error> {
-        let current_dir = env::current_dir().unwrap_or_default();
-        let full_path = current_dir.join(path);
+    fn parse_toml(contents: &str, config: &mut AppConfig) {
+        match toml::from_str::<TomlConfig>(contents) {
+            Ok(t) => {
+                if let Some(input) = t.input {
+                    if let Some(v) = input.push_start_threshold_ms { config.push_start_threshold = Duration::from_millis(v); }
+                    if let Some(v) = input.tap_timeout_ms { config.tap_timeout = Duration::from_millis(v); }
+                    if let Some(v) = input.push_release_window_ms { config.push_release_window = Duration::from_millis(v); }
+                    if let Some(v) = input.audio_multiplier { config.audio_multiplier = v; }
+                }
+                if let Some(groq) = t.groq {
+                    if let Some(v) = groq.api_key { config.groq_api_key = v; }
+                    if let Some(v) = groq.language { config.groq_language = v; }
+                    if let Some(v) = groq.whisper_prompt { config.whisper_prompt = v; }
+                    if let Some(v) = groq.experimental_live { config.experimental_live = v; }
+                }
+                if let Some(out) = t.output {
+                    if let Some(v) = out.copy_to_clipboard { config.copy_to_clipboard = v; }
+                    if let Some(v) = out.paste_to_input { config.paste_to_input = v; }
+                    if let Some(v) = out.auto_enter { config.auto_enter = v; }
+                    if let Some(v) = out.auto_enter_delay_ms { config.auto_enter_delay = Duration::from_millis(v); }
+                    if let Some(v) = out.add_period { config.add_period = v; }
+                    if let Some(v) = out.export_audio { config.export_audio = v; }
+                }
+                if let Some(pipe) = t.pipeline {
+                    if let Some(v) = pipe.mode {
+                        config.pipeline_mode = match v.as_str() {
+                            "realtime" => PipelineMode::Realtime,
+                            _ => PipelineMode::Robust,
+                        };
+                    }
+                    if let Some(v) = pipe.chunk_window_ms { config.chunk_window = Duration::from_millis(v); }
+                    if let Some(v) = pipe.profile_latency { config.profile_latency = v; }
+                }
+                if let Some(hot) = t.hotkeys {
+                    if let Some(v) = hot.modifier { if let Some(k) = parse_keycode(&v) { config.hotkey_modifier = k; } }
+                    if let Some(v) = hot.trigger { if let Some(k) = parse_keycode(&v) { config.hotkey_trigger = k; } }
+                    if let Some(v) = hot.toggle_format { if let Some(k) = parse_keycode(&v) { config.hotkey_toggle_format = k; } }
+                    if let Some(v) = hot.send_with_enter { if let Some(k) = parse_keycode(&v) { config.hotkey_send_with_enter = k; } }
+                    if let Some(v) = hot.increase_gain { if let Some(k) = parse_keycode(&v) { config.hotkey_increase_gain = k; } }
+                    if let Some(v) = hot.decrease_gain { if let Some(k) = parse_keycode(&v) { config.hotkey_decrease_gain = k; } }
+                } else {
+                    println!("⚠️ No se encontró sección [hotkeys] en el archivo.");
+                }
+
+                // Cargar diccionario de reemplazos
+                config.dictionary_enabled = true;
+                if let Some(table) = contents.parse::<toml::Value>().ok()
+                    .and_then(|v| v.get("dictionary").cloned())
+                    .and_then(|v| v.as_table().cloned())
+                {
+                    if let Some(enabled) = table.get("enabled").and_then(|v| v.as_bool()) {
+                        config.dictionary_enabled = enabled;
+                    }
+
+                    let mut dict: Vec<(String, String)> = table.into_iter()
+                        .filter_map(|(k, v)| {
+                            if k == "enabled" {
+                                return None;
+                            }
+                            v.as_str().map(|s| (k, s.to_string()))
+                        })
+                        .collect();
+                    dict.sort_by(|a, b| b.0.len().cmp(&a.0.len()));
+                    if !dict.is_empty() {
+                        println!("📖 Diccionario cargado: {} reemplazos (Habilitado: {})", dict.len(), config.dictionary_enabled);
+                    }
+                    config.dictionary = dict;
+                }
+            }
+            Err(e) => {
+                eprintln!("❌ Error parseando TOML: {}", e);
+            }
+        }
+    }
+
+    pub fn save_audio_multiplier(config_path: Option<&std::path::Path>, gain: f32) -> Result<(), std::io::Error> {
+        let full_path = match config_path {
+            Some(p) => p.to_path_buf(),
+            None => env::current_dir().unwrap_or_default().join("config.toml"),
+        };
         
         if let Ok(contents) = fs::read_to_string(&full_path) {
             let mut new_contents = String::new();

@@ -120,13 +120,13 @@ pub async fn run(
                 let mut new_gain = hot_mic.get_multiplier() + 0.5;
                 if new_gain > 20.0 { new_gain = 20.0; } // límite razonable
                 hot_mic.set_multiplier(new_gain);
-                let _ = AppConfig::save_audio_multiplier("config.toml", new_gain);
+                let _ = AppConfig::save_audio_multiplier(config.config_path.as_deref(), new_gain);
             }
             Command::DecreaseGain => {
                 let mut new_gain = hot_mic.get_multiplier() - 0.5;
                 if new_gain < 0.5 { new_gain = 0.5; }
                 hot_mic.set_multiplier(new_gain);
-                let _ = AppConfig::save_audio_multiplier("config.toml", new_gain);
+                let _ = AppConfig::save_audio_multiplier(config.config_path.as_deref(), new_gain);
             }
         }
     }

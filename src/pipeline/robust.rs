@@ -1,5 +1,6 @@
 use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot};
+use aho_corasick::{AhoCorasick, MatchKind};
 use crate::audio::capture::HotMic;
 use crate::config::AppConfig;
 use crate::input::Command;
@@ -135,40 +136,27 @@ pub async fn run(
 async fn deliver_text(text: &str, config: &AppConfig, add_period: bool, auto_enter: bool, profiler: &mut PipelineProfiler) {
     let mut final_text = text.trim().to_string();
 
-    // 0. Diccionario de reemplazos (case-insensitive)
+    // 0. Diccionario de reemplazos (case-insensitive) — single-pass con Aho-Corasick
     profiler.stamp("Diccionario (Inicio)");
     if config.dictionary_enabled && !config.dictionary.is_empty() {
-        let mut text_lower = final_text.to_lowercase();
-        for (from, to) in &config.dictionary {
-            if from.is_empty() {
-                continue;
-            }
-            let from_lower = from.to_lowercase();
-            if !text_lower.contains(&from_lower) {
-                continue;
-            }
+        let patterns: Vec<String> = config.dictionary.iter()
+            .map(|(k, _)| k.to_lowercase())
+            .collect();
+        let ac = AhoCorasick::builder()
+            .match_kind(MatchKind::LeftmostLongest)
+            .build(&patterns)
+            .expect("build Aho-Corasick automaton");
 
-            // Reemplazo seguro a nivel de caracteres (evita panics por límites de bytes UTF-8)
-            let mut result = String::with_capacity(final_text.len());
-            let text_chars: Vec<char> = final_text.chars().collect();
-            let text_lower_chars: Vec<char> = text_lower.chars().collect();
-            let from_chars: Vec<char> = from_lower.chars().collect();
-
-            let mut i = 0;
-            while i < text_chars.len() {
-                if i + from_chars.len() <= text_lower_chars.len()
-                    && text_lower_chars[i..i + from_chars.len()] == from_chars
-                {
-                    result.push_str(to);
-                    i += from_chars.len();
-                } else {
-                    result.push(text_chars[i]);
-                    i += 1;
-                }
-            }
-            final_text = result;
-            text_lower = final_text.to_lowercase();
+        let lower_input = final_text.to_lowercase();
+        let mut result = String::with_capacity(final_text.len());
+        let mut last_end = 0;
+        for m in ac.find_iter(&lower_input) {
+            result.push_str(&final_text[last_end..m.start()]);
+            result.push_str(&config.dictionary[m.pattern().as_usize()].1);
+            last_end = m.end();
         }
+        result.push_str(&final_text[last_end..]);
+        final_text = result;
     }
     profiler.stamp("Diccionario (Fin / Reemplazo completado)");
 

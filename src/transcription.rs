@@ -14,7 +14,7 @@ where F: FnMut(u32, u32, Duration, &TranscriptionError) {
                 let cap = retry.jitter.as_millis() as u64;
                 let jitter = if cap == 0 { Duration::ZERO } else { Duration::from_millis(crate::overlay::now_ms().unwrap_or(0) % (cap + 1)) };
                 let delay = error.retry_after().unwrap_or(base.saturating_add(jitter));
-                tracing::warn!(code=error.code(), attempt, max_attempts, delay_ms=delay.as_millis() as u64, error=%error, error_chain=?error, "Fallo transitorio de transcripción; se reintentará");
+                tracing::warn!(code=error.code(), attempt, max_attempts, delay_ms=delay.as_millis() as u64, status=error.status(), request_id=error.request_id(), error=%error, error_chain=%crate::observability::error_chain(&error), "Fallo transitorio de transcripción; se reintentará");
                 on_retry(attempt + 1, max_attempts, delay, &error);
                 tokio::time::sleep(delay).await;
             }

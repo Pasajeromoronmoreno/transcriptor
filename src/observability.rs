@@ -4,6 +4,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
+use std::error::Error;
 use tracing::Subscriber;
 use tracing_appender::non_blocking::WorkerGuard;
 use tracing_subscriber::layer::{Layer, SubscriberExt};
@@ -13,6 +14,16 @@ use tracing_subscriber::{EnvFilter, fmt};
 
 const LOG_FILE_PREFIX: &str = "transcriptor.log";
 const SECONDS_PER_DAY: u64 = 24 * 60 * 60;
+
+pub fn error_chain(error: &dyn Error) -> String {
+    let mut messages = vec![error.to_string()];
+    let mut source = error.source();
+    while let Some(cause) = source {
+        messages.push(cause.to_string());
+        source = cause.source();
+    }
+    messages.join(" -> ")
+}
 
 /// Owns the non-blocking logging worker for the lifetime of the application.
 pub struct Observability {
@@ -234,5 +245,17 @@ mod tests {
     #[test]
     fn retention_duration_is_day_based() {
         assert_eq!(Duration::from_secs(7 * 24 * 60 * 60).as_secs(), 604_800);
+    }
+
+    #[test]
+    fn zero_retention_removes_matching_old_file_only() {
+        let directory = std::env::temp_dir().join(format!("transcriptor-retention-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&directory); fs::create_dir_all(&directory).unwrap();
+        let log = directory.join(format!("{LOG_FILE_PREFIX}.old"));
+        fs::write(&log, b"old").unwrap();
+        std::thread::sleep(Duration::from_millis(2));
+        assert_eq!(cleanup_old_logs(&directory, 0).unwrap(), 1);
+        assert!(!log.exists());
+        let _ = fs::remove_dir_all(directory);
     }
 }

@@ -143,7 +143,7 @@ async fn finish_recording(session_id: u64, hot_mic: &HotMic, config: &AppConfig,
             }
         }
         Err(error) => {
-            tracing::error!(code=error.code(), error=%error, error_chain=?error, "Fallo definitivo de transcripción");
+            tracing::error!(code=error.code(), status=error.status(), request_id=error.request_id(), error=%error, error_chain=%crate::observability::error_chain(&error), "Fallo definitivo de transcripción");
             eprintln!("❌ Error Groq [{}]: {error:?}", error.code());
             overlay.publish(AppPhase::Error, None, Some(format!("Error de transcripción · {}", error.code())));
             profiler.finish();
@@ -255,7 +255,7 @@ async fn auto_split_monitor(mic: Arc<HotMic>, config: AppConfig, mut cancel: one
                             tracing::error!(code=error.code(), error=%error, "Fallo de salida en auto-split");
                         }
                       }
-                      Err(error) => tracing::error!(code=error.code(), error=%error, error_chain=?error, "Fallo de transcripción en auto-split"),
+                      Err(error) => tracing::error!(code=error.code(), status=error.status(), request_id=error.request_id(), error=%error, error_chain=%crate::observability::error_chain(&error), "Fallo de transcripción en auto-split"),
                     }
                 }
             }

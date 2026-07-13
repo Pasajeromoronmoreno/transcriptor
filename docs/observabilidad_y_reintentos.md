@@ -1,5 +1,12 @@
 # Plan de observabilidad, errores y reintentos
 
+## Estado de implementación
+
+Implementado en `feat/observability-retries`: logging estructurado en consola y
+archivo, retención, diagnósticos de configuración, errores tipados de Groq,
+servicio de reintentos configurable, contexto por sesión, pipeline unificado,
+estado de retry/error en el overlay y pruebas HTTP locales deterministas.
+
 ## Objetivo
 
 Hacer que cada fallo del flujo de grabación pueda responder, con evidencia:

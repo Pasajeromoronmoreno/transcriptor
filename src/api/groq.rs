@@ -39,6 +39,8 @@ impl TranscriptionError {
     pub fn retry_after(&self) -> Option<Duration> {
         match self { Self::Http { retry_after, .. } => *retry_after, _ => None }
     }
+    pub fn status(&self) -> Option<u16> { match self { Self::Http { status, .. } => Some(status.as_u16()), _ => None } }
+    pub fn request_id(&self) -> Option<&str> { match self { Self::Http { request_id, .. } => request_id.as_deref(), _ => None } }
 }
 
 pub struct GroqClient { client: reqwest::Client, endpoint: String }

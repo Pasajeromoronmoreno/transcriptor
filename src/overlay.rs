@@ -7,6 +7,8 @@ use std::path::PathBuf;
 #[cfg(feature = "overlay")]
 use std::process::{Child, Command, Stdio};
 #[cfg(feature = "overlay")]
+use std::os::unix::process::CommandExt;
+#[cfg(feature = "overlay")]
 use tokio::io::AsyncWriteExt;
 #[cfg(feature = "overlay")]
 use tokio::net::UnixListener;
@@ -159,13 +161,19 @@ async fn start_enabled(hub: OverlayHub) -> Result<OverlayHandle, Box<dyn std::er
     let listener = UnixListener::bind(&socket_path)?;
 
     let executable = std::env::current_exe()?;
-    let child = Command::new(executable)
+    let mut command = Command::new(executable);
+    command
         .arg("--overlay")
         .arg(&socket_path)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::inherit())
-        .spawn()?;
+        .stderr(Stdio::null());
+
+    // The overlay is a desktop surface, not another terminal job. Giving it
+    // its own process group prevents terminal-generated signals from reaching
+    // both the recorder and the GTK process at once.
+    command.process_group(0);
+    let child = command.spawn()?;
 
     let server_task = tokio::spawn(serve(listener, hub.subscribe()));
     Ok(OverlayHandle {

@@ -29,6 +29,11 @@ async fn main() {
 
     let _ = dotenvy::dotenv();
 
+    // This is a background application controlled by global evdev shortcuts.
+    // A terminal must not be able to terminate it when the physical shortcut
+    // happens to map to the terminal's QUIT character for the active layout.
+    ignore_terminal_quit();
+
     // Limpia instancias previas y procesos huérfanos para un inicio limpio.
     cleanup_old_processes();
     let config = AppConfig::load_from_file("config.toml");
@@ -99,6 +104,19 @@ async fn main() {
         handle.shutdown();
     }
 }
+
+#[cfg(unix)]
+fn ignore_terminal_quit() {
+    tokio::spawn(async {
+        let Ok(mut quit) = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::quit()) else {
+            return;
+        };
+        while quit.recv().await.is_some() {}
+    });
+}
+
+#[cfg(not(unix))]
+fn ignore_terminal_quit() {}
 
 fn overlay_socket_arg() -> Option<String> {
     let mut args = std::env::args().skip(1);

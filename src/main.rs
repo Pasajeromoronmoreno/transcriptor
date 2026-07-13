@@ -165,10 +165,12 @@ fn cleanup_old_processes() {
     let current_pid = std::process::id();
 
     // 1. Matar procesos parec huérfanos
-    let _ = Command::new("pkill")
+    if let Err(error) = Command::new("pkill")
         .arg("-f")
         .arg("parec --format=s16le")
-        .spawn();
+        .spawn() {
+        tracing::warn!(code="TRN-CLEANUP-PAREC", error=%error, "No se pudo ejecutar limpieza de parec");
+    }
 
     // 2. Matar otras instancias de transcriptor (excepto nosotros mismos)
     // Usamos pgrep para encontrar pids y los filtramos en el shell o aquí
@@ -181,7 +183,9 @@ fn cleanup_old_processes() {
         for pid_str in pids.lines() {
             if let Ok(pid) = pid_str.trim().parse::<u32>() {
                 if pid != current_pid {
-                    let _ = Command::new("kill").arg("-9").arg(pid.to_string()).spawn();
+                    if let Err(error) = Command::new("kill").arg("-9").arg(pid.to_string()).spawn() {
+                        tracing::warn!(code="TRN-CLEANUP-PROCESS", pid, error=%error, "No se pudo limpiar una instancia anterior");
+                    }
                 }
             }
         }

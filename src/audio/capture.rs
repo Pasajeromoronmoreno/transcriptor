@@ -78,7 +78,10 @@ impl HotMic {
                                     b.extend_from_slice(&processed_buf);
                                 }
                             }
-                            Err(_) => break,
+                            Err(error) => {
+                                tracing::error!(code="TRN-AUDIO-READ", error=%error, "Falló la lectura del capturador de audio");
+                                break;
+                            }
                         }
                     }
                 }

@@ -19,10 +19,10 @@ pub fn init() {
                     Ok(dev) => {
                         *guard = Some(dev);
                     }
-                    Err(e) => eprintln!("❌ Error creando uinput (¿Permisos?): {}", e),
+                    Err(e) => tracing::error!(code="TRN-OUTPUT-UINPUT", error=%e, "Error creando uinput; comprueba permisos"),
                 }
             }
-            Err(e) => eprintln!("❌ Error uinput builder: {}", e),
+            Err(e) => tracing::error!(code="TRN-OUTPUT-UINPUT", error=%e, "Error creando el builder uinput"),
         }
     }
 }
@@ -34,9 +34,9 @@ pub fn init() {
 /// Usar `Shift+Insert` (estándar CUA de IBM) es la única solución elegante
 /// verdaderamente cross-platform (Linux X11/Wayland, Windows CMD/GUI) que
 /// permite a esta macro funcionar en CUALQUIER contexto sin saber la ventana activa.
-pub fn paste_from_clipboard() {
-    if let Ok(mut guard) = DEVICE.lock() {
-        if let Some(dev) = guard.as_mut() {
+pub fn paste_from_clipboard() -> Result<(), String> {
+    let mut guard = DEVICE.lock().map_err(|_| "uinput lock poisoned".to_string())?;
+    if let Some(dev) = guard.as_mut() {
             // Aseguramos que no haya basura de modificadores virtuales
             let _ = dev.release(&keyboard::Key::LeftControl);
             let _ = dev.release(&keyboard::Key::LeftShift);
@@ -47,18 +47,15 @@ pub fn paste_from_clipboard() {
             let _ = dev.press(&keyboard::Key::LeftShift);
             let _ = dev.click(&keyboard::Key::Insert);
             let _ = dev.release(&keyboard::Key::LeftShift);
-            let _ = dev.synchronize();
-        }
+            dev.synchronize().map_err(|e| e.to_string())?;
+            return Ok(());
     }
+    Err("uinput device unavailable".to_string())
 }
 
-pub fn press_enter() {
-    if let Ok(mut guard) = DEVICE.lock() {
-        if let Some(dev) = guard.as_mut() {
-            let _ = dev.click(&keyboard::Key::Enter);
-            let _ = dev.synchronize();
-        }
-    }
+pub fn press_enter() -> Result<(), String> {
+    let mut guard = DEVICE.lock().map_err(|_| "uinput lock poisoned".to_string())?;
+    let dev = guard.as_mut().ok_or_else(|| "uinput device unavailable".to_string())?;
+    dev.click(&keyboard::Key::Enter).map_err(|e| e.to_string())?;
+    dev.synchronize().map_err(|e| e.to_string())
 }
-
-

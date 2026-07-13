@@ -13,6 +13,7 @@ struct TomlConfig {
     pipeline: Option<PipelineToml>,
     hotkeys: Option<HotkeysToml>,
     logging: Option<LoggingToml>,
+    retry: Option<RetryToml>,
 }
 
 #[derive(Deserialize, Debug)]
@@ -29,6 +30,16 @@ struct GroqToml {
     language: Option<String>,
     whisper_prompt: Option<String>,
     experimental_live: Option<bool>,
+    connect_timeout_ms: Option<u64>,
+    request_timeout_ms: Option<u64>,
+}
+
+#[derive(Deserialize, Debug)]
+struct RetryToml {
+    max_attempts: Option<u32>,
+    initial_delay_ms: Option<u64>,
+    max_delay_ms: Option<u64>,
+    jitter_ms: Option<u64>,
 }
 
 #[derive(Deserialize, Debug)]
@@ -70,6 +81,20 @@ pub struct LoggingConfig {
     pub level: String,
     pub file: bool,
     pub retention_days: u64,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct RetryConfig {
+    pub max_attempts: u32,
+    pub initial_delay: Duration,
+    pub max_delay: Duration,
+    pub jitter: Duration,
+}
+
+impl Default for RetryConfig {
+    fn default() -> Self {
+        Self { max_attempts: 3, initial_delay: Duration::from_millis(1000), max_delay: Duration::from_millis(5000), jitter: Duration::from_millis(250) }
+    }
 }
 
 impl Default for LoggingConfig {
@@ -117,6 +142,9 @@ pub struct AppConfig {
     pub dictionary_enabled: bool,
     pub config_path: Option<PathBuf>,
     pub logging: LoggingConfig,
+    pub retry: RetryConfig,
+    pub groq_connect_timeout: Duration,
+    pub groq_request_timeout: Duration,
 }
 
 impl Default for AppConfig {
@@ -149,6 +177,9 @@ impl Default for AppConfig {
             dictionary_enabled: true,
             config_path: None,
             logging: LoggingConfig::default(),
+            retry: RetryConfig::default(),
+            groq_connect_timeout: Duration::from_millis(5000),
+            groq_request_timeout: Duration::from_millis(30000),
         }
     }
 }
@@ -231,6 +262,8 @@ impl AppConfig {
                     if let Some(v) = groq.experimental_live {
                         config.experimental_live = v;
                     }
+                    if let Some(v) = groq.connect_timeout_ms { config.groq_connect_timeout = Duration::from_millis(v); }
+                    if let Some(v) = groq.request_timeout_ms { config.groq_request_timeout = Duration::from_millis(v); }
                 }
                 if let Some(out) = t.output {
                     if let Some(v) = out.copy_to_clipboard {
@@ -311,6 +344,12 @@ impl AppConfig {
                         config.logging.retention_days = v;
                     }
                 }
+                if let Some(retry) = t.retry {
+                    if let Some(v) = retry.max_attempts { config.retry.max_attempts = v.max(1); }
+                    if let Some(v) = retry.initial_delay_ms { config.retry.initial_delay = Duration::from_millis(v); }
+                    if let Some(v) = retry.max_delay_ms { config.retry.max_delay = Duration::from_millis(v); }
+                    if let Some(v) = retry.jitter_ms { config.retry.jitter = Duration::from_millis(v); }
+                }
 
                 // Cargar diccionario de reemplazos
                 config.dictionary_enabled = true;
@@ -354,7 +393,7 @@ impl AppConfig {
             None => env::current_dir().unwrap_or_default().join("config.toml"),
         };
 
-        if let Ok(contents) = fs::read_to_string(&full_path) {
+        let contents = fs::read_to_string(&full_path)?;
             let mut new_contents = String::new();
             let mut in_input = false;
             let mut replaced = false;
@@ -381,7 +420,6 @@ impl AppConfig {
                 new_contents.push_str(&format!("audio_multiplier = {:.1}\n", gain));
             }
             fs::write(full_path, new_contents)?;
-        }
         Ok(())
     }
 }
@@ -478,5 +516,24 @@ mod tests {
         assert_eq!(config.logging.level, "debug,transcriptor=trace");
         assert!(!config.logging.file);
         assert_eq!(config.logging.retention_days, 21);
+    }
+
+    #[test]
+    fn retry_and_timeouts_are_configurable_and_safe() {
+        let mut config = AppConfig::default();
+        AppConfig::parse_toml(r#"
+            [retry]
+            max_attempts = 0
+            initial_delay_ms = 25
+            max_delay_ms = 100
+            jitter_ms = 5
+            [groq]
+            connect_timeout_ms = 200
+            request_timeout_ms = 900
+        "#, &mut config);
+        assert_eq!(config.retry.max_attempts, 1);
+        assert_eq!(config.retry.initial_delay, std::time::Duration::from_millis(25));
+        assert_eq!(config.groq_connect_timeout, std::time::Duration::from_millis(200));
+        assert_eq!(config.groq_request_timeout, std::time::Duration::from_millis(900));
     }
 }

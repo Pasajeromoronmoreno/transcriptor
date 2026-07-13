@@ -30,18 +30,30 @@ cargo run
 
 ### Overlay global
 
-El overlay de estado se compila de forma opcional porque requiere las bibliotecas
-de desarrollo GTK4 y GTK4 Layer Shell del sistema. Una vez instaladas, ejecuta:
+El overlay forma parte del build normal y requiere GTK4 y GTK4 Layer Shell:
 
 ```bash
 sudo dnf install gtk4-devel gtk4-layer-shell-devel
-cargo run --features overlay
+cargo run
 ```
 
 La OSD se ejecuta como un proceso separado del grabador, no toma foco y muestra
 los estados de armado, grabacion Push/Tap, latch, transcripcion, pegado y error.
-Si la feature no esta habilitada, la aplicacion principal sigue funcionando sin
-overlay y deja un aviso explicito en consola.
+### Logs, errores y reintentos
+
+La aplicación escribe eventos legibles en consola y logs JSON diarios en
+`$XDG_STATE_HOME/transcriptor/logs` o `~/.local/state/transcriptor/logs`.
+Al iniciar informa la ruta efectiva. Los archivos se conservan siete días por
+defecto y nunca incluyen la API key, audio, prompt completo o transcripción.
+
+Cada grabación tiene un `session_id`. Los fallos muestran un código estable en
+el overlay y guardan en el log la causa técnica, intento, status HTTP y request
+ID de Groq cuando están disponibles. Timeout, 408, 429 y errores transitorios
+5xx se reintentan con backoff; autenticación y otros 4xx no.
+
+Las secciones opcionales `[logging]` y `[retry]`, además de los timeouts bajo
+`[groq]`, están documentadas en `config.example.toml`. `RUST_LOG` permite subir
+temporalmente el nivel de diagnóstico.
 
 ## Experimentos
 

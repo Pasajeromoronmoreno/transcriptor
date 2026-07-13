@@ -145,7 +145,7 @@ pub async fn start() -> (OverlayHub, Option<OverlayHandle>) {
         match start_enabled(hub.clone()).await {
             Ok(handle) => (hub, Some(handle)),
             Err(error) => {
-                eprintln!("⚠️ No se pudo iniciar el overlay: {error}");
+                tracing::warn!(code="TRN-OVERLAY-START", error=%error, "No se pudo iniciar el overlay");
                 (hub, None)
             }
         }

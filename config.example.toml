@@ -13,6 +13,12 @@ file = true
 # Días de retención de archivos de log rotados.
 retention_days = 7
 
+[retry]
+max_attempts = 3
+initial_delay_ms = 1000
+max_delay_ms = 5000
+jitter_ms = 250
+
 [groq]
 # Recomendado: guarda la API key en .env como GROQ_API_KEY.
 # Este campo queda como fallback local, pero puede quedar vacio.
@@ -21,6 +27,8 @@ language = "es"
 # Prompt para guiar el estilo de Whisper (puntuación y formato correcto)
 whisper_prompt = "Esta es una transcripción en español con puntuación gramatical correcta. Incluye comas, puntos y signos de interrogación para marcar las pausas y el sentido de la conversación."
 experimental_live = true
+connect_timeout_ms = 5000
+request_timeout_ms = 30000
 
 [output]
 # Copiar la transcripción final al portapapeles

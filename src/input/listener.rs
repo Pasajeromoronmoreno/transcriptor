@@ -14,7 +14,7 @@ pub fn start_keyboard_listener(tx: mpsc::UnboundedSender<KeyEvent>, config: AppC
     .collect::<Vec<_>>();
 
     if devices.is_empty() {
-        eprintln!("❌ No se encontró ningún teclado real en /dev/input.");
+        tracing::error!(code="TRN-INPUT-NO-DEVICE", "No se encontró ningún teclado real en /dev/input");
         return;
     }
 
@@ -38,7 +38,10 @@ pub fn start_keyboard_listener(tx: mpsc::UnboundedSender<KeyEvent>, config: AppC
             loop {
                 let events: Vec<_> = match dev.fetch_events() {
                     Ok(e) => e.collect(),
-                    Err(_) => break,
+                    Err(error) => {
+                        tracing::error!(code="TRN-INPUT-READ", error=%error, "Falló la lectura del dispositivo de entrada");
+                        break;
+                    },
                 };
 
                 for ev in events {

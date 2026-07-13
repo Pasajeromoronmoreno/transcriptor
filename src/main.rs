@@ -6,6 +6,7 @@ mod observability;
 mod output;
 mod overlay;
 mod pipeline;
+mod transcription;
 
 use config::AppConfig;
 use input::{listener, state_machine};

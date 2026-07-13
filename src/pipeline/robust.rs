@@ -5,7 +5,7 @@ use crate::audio::capture::HotMic;
 use crate::config::AppConfig;
 use crate::input::Command;
 use crate::overlay::{AppPhase, OverlayHub, RecordingMode};
-use crate::{api, output};
+use crate::{api, output, transcription};
 use crate::pipeline::profile::PipelineProfiler;
 use thiserror::Error;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -119,7 +119,15 @@ async fn finish_recording(session_id: u64, hot_mic: &HotMic, config: &AppConfig,
     let prompt = config.experimental_live.then_some(config.whisper_prompt.as_str());
     profiler.stamp("Inferencia API Groq (Iniciar Petición)");
     let retry_overlay = overlay.clone();
-    match api::groq::transcribe_audio(&config.groq_api_key, &wav, &config.groq_language, prompt, &config.retry, config.groq_connect_timeout, config.groq_request_timeout, move |attempt, max, _, error| {
+    let client = match api::groq::GroqClient::new(config.groq_connect_timeout, config.groq_request_timeout) {
+        Ok(client) => client,
+        Err(error) => {
+            tracing::error!(code=error.code(), error=%error, "No se pudo crear el cliente de transcripción");
+            overlay.publish(AppPhase::Error, None, Some(format!("Error de transcripción · {}", error.code())));
+            return;
+        }
+    };
+    match transcription::transcribe(&client, &config.retry, &config.groq_api_key, &wav, &config.groq_language, prompt, move |attempt, max, _, error| {
         let reason = if error.code() == "TRN-GROQ-RATE" { "Groq ocupado" } else { "Problema de red" };
         retry_overlay.publish(AppPhase::Retrying, session_mode, Some(format!("{reason} · reintentando {attempt}/{max}…")));
     }).await {
@@ -235,7 +243,11 @@ async fn auto_split_monitor(mic: Arc<HotMic>, config: AppConfig, mut cancel: one
                     let wav = mic.flush_and_continue().await;
                     let p = if config.experimental_live { Some(config.whisper_prompt.as_str()) } else { None };
                     if config.experimental_live { println!("🧪 [Experimental Live] Aplicando prompt en auto-split..."); }
-                    match api::groq::transcribe_audio(&config.groq_api_key, &wav, &config.groq_language, p, &config.retry, config.groq_connect_timeout, config.groq_request_timeout, |_, _, _, _| {}).await {
+                    let client = match api::groq::GroqClient::new(config.groq_connect_timeout, config.groq_request_timeout) {
+                        Ok(client) => client,
+                        Err(error) => { tracing::error!(code=error.code(), error=%error, "No se pudo crear cliente Groq en auto-split"); continue; }
+                    };
+                    match transcription::transcribe(&client, &config.retry, &config.groq_api_key, &wav, &config.groq_language, p, |_, _, _, _| {}).await {
                       Ok(text) => {
                         // En auto-split usamos la configuración base con profiler inactivo
                         let mut dummy_profiler = PipelineProfiler::new(false);

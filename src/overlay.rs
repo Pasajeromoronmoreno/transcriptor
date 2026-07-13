@@ -39,6 +39,7 @@ pub enum AppPhase {
     Recording,
     WaitingForLatch,
     Transcribing,
+    Retrying,
     Delivering,
     Error,
 }
@@ -326,6 +327,7 @@ mod ui {
             },
             AppPhase::WaitingForLatch => ("🔴 Grabando · esperando latch", "recording"),
             AppPhase::Transcribing => ("🔵 Transcribiendo…", "processing"),
+            AppPhase::Retrying => ("🟠 Problema de red · reintentando…", "processing"),
             AppPhase::Delivering => ("🟢 Pegando resultado…", "success"),
             AppPhase::Error => ("⚠️ Error", "error"),
         };

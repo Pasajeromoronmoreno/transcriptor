@@ -84,7 +84,10 @@ pub async fn run(
                     if config.experimental_live { println!("🧪 [Experimental Live] Aplicando prompt de estilo..."); }
                     
                     profiler.stamp("Inferencia API Groq (Iniciar Petición)");
-                    match api::groq::transcribe_audio(&config.groq_api_key, wav, &config.groq_language, p).await {
+                    let retry_overlay = overlay.clone();
+                    match api::groq::transcribe_audio(&config.groq_api_key, &wav, &config.groq_language, p, move |attempt, max, _, _| {
+                        retry_overlay.publish(AppPhase::Retrying, session_mode, Some(format!("Problema de red · reintentando {attempt}/{max}…")));
+                    }).await {
                         Ok(text) => {
                             profiler.stamp("API Groq (Respuesta Recibida)");
                             overlay.publish(AppPhase::Delivering, session_mode, None);
@@ -92,8 +95,9 @@ pub async fn run(
                             overlay.publish(AppPhase::Idle, None, None);
                         }
                         Err(e) => {
-                            eprintln!("❌ Error Groq: {}", e);
-                            overlay.publish(AppPhase::Error, None, Some("Error de transcripción".to_string()));
+                            tracing::error!(code=e.code(), error=%e, error_chain=?e, "Fallo definitivo de transcripción");
+                            eprintln!("❌ Error Groq [{}]: {e:?}", e.code());
+                            overlay.publish(AppPhase::Error, None, Some(format!("Error de transcripción · {}", e.code())));
                             profiler.finish();
                         }
                     }
@@ -124,7 +128,10 @@ pub async fn run(
                     if config.experimental_live { println!("🧪 [Experimental Live] Aplicando prompt de estilo..."); }
                     
                     profiler.stamp("Inferencia API Groq (Iniciar Petición)");
-                    match api::groq::transcribe_audio(&config.groq_api_key, wav, &config.groq_language, p).await {
+                    let retry_overlay = overlay.clone();
+                    match api::groq::transcribe_audio(&config.groq_api_key, &wav, &config.groq_language, p, move |attempt, max, _, _| {
+                        retry_overlay.publish(AppPhase::Retrying, session_mode, Some(format!("Problema de red · reintentando {attempt}/{max}…")));
+                    }).await {
                         Ok(text) => {
                             profiler.stamp("API Groq (Respuesta Recibida)");
                             overlay.publish(AppPhase::Delivering, session_mode, None);
@@ -132,8 +139,9 @@ pub async fn run(
                             overlay.publish(AppPhase::Idle, None, None);
                         }
                         Err(e) => {
-                            eprintln!("❌ Error Groq: {}", e);
-                            overlay.publish(AppPhase::Error, None, Some("Error de transcripción".to_string()));
+                            tracing::error!(code=e.code(), error=%e, error_chain=?e, "Fallo definitivo de transcripción");
+                            eprintln!("❌ Error Groq [{}]: {e:?}", e.code());
+                            overlay.publish(AppPhase::Error, None, Some(format!("Error de transcripción · {}", e.code())));
                             profiler.finish();
                         }
                     }
@@ -244,10 +252,13 @@ async fn auto_split_monitor(mic: Arc<HotMic>, config: AppConfig, mut cancel: one
                     let wav = mic.flush_and_continue().await;
                     let p = if config.experimental_live { Some(config.whisper_prompt.as_str()) } else { None };
                     if config.experimental_live { println!("🧪 [Experimental Live] Aplicando prompt en auto-split..."); }
-                    if let Ok(text) = api::groq::transcribe_audio(&config.groq_api_key, wav, &config.groq_language, p).await {
+                    match api::groq::transcribe_audio(&config.groq_api_key, &wav, &config.groq_language, p, |_, _, _, _| {}).await {
+                      Ok(text) => {
                         // En auto-split usamos la configuración base con profiler inactivo
                         let mut dummy_profiler = PipelineProfiler::new(false);
                         deliver_text(&text, &config, config.add_period, config.auto_enter, &mut dummy_profiler).await;
+                      }
+                      Err(error) => tracing::error!(code=error.code(), error=%error, error_chain=?error, "Fallo de transcripción en auto-split"),
                     }
                 }
             }

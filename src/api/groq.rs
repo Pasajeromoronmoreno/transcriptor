@@ -45,6 +45,12 @@ impl TranscriptionError {
 
 pub struct GroqClient { client: reqwest::Client, endpoint: String }
 
+fn redact_body(mut body: String, api_key: &str, prompt: Option<&str>) -> String {
+    if !api_key.is_empty() { body = body.replace(api_key, "[REDACTED]"); }
+    if let Some(prompt) = prompt.filter(|value| !value.is_empty()) { body = body.replace(prompt, "[REDACTED_PROMPT]"); }
+    body
+}
+
 impl GroqClient {
     pub fn new(connect_timeout: Duration, request_timeout: Duration) -> Result<Self, TranscriptionError> {
         Self::with_endpoint(ENDPOINT, connect_timeout, request_timeout)
@@ -68,6 +74,7 @@ impl GroqClient {
         if !status.is_success() {
             let mut body = response.text().await.unwrap_or_else(|error| format!("<body unreadable: {error}>"));
             body.truncate(1024);
+            body = redact_body(body, api_key, prompt);
             return Err(TranscriptionError::Http { status, request_id, body, retry_after });
         }
         response.json::<GroqResponse>().await.map(|r| r.text.trim().to_owned()).map_err(TranscriptionError::Decode)
@@ -83,5 +90,10 @@ mod tests {
         let auth = TranscriptionError::Http { status: StatusCode::UNAUTHORIZED, request_id: None, body: String::new(), retry_after: None };
         assert!(rate.retryable()); assert_eq!(rate.code(), "TRN-GROQ-RATE");
         assert!(!auth.retryable()); assert_eq!(auth.code(), "TRN-GROQ-AUTH");
+    }
+    #[test]
+    fn provider_body_redacts_secrets() {
+        let body = redact_body("key=secret prompt=private".into(), "secret", Some("private"));
+        assert!(!body.contains("secret")); assert!(!body.contains("private"));
     }
 }

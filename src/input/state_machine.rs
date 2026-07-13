@@ -38,6 +38,7 @@ pub async fn run_state_machine(
                 match (state, event) {
                     // --- IDLE ---
                     (InternalState::Idle, KeyEvent::Down { modifier: true }) => {
+                        let _ = cmd_tx.send(Command::BeginArming);
                         state = InternalState::Evaluating { start: now };
                     }
 
@@ -50,6 +51,7 @@ pub async fn run_state_machine(
                     
                     // --- MODO PUSH (Mantenido) ---
                     (InternalState::RecordingPush, KeyEvent::Up) => {
+                        let _ = cmd_tx.send(Command::WaitForLatch);
                         state = InternalState::WaitingForLatch { 
                             latch_deadline: now + latch_window 
                         };
@@ -65,6 +67,7 @@ pub async fn run_state_machine(
                     // --- WAITING FOR LATCH ---
                     (InternalState::WaitingForLatch { .. }, KeyEvent::Down { .. }) => {
                         println!("🔁 Recording anclada (LATCH).");
+                        let _ = cmd_tx.send(Command::LatchRecording);
                         state = InternalState::RecordingTap { started_at: now };
                     }
 

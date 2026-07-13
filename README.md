@@ -28,6 +28,21 @@ El proyecto esta en uso diario y el flujo principal hoy es `robust`: grabar, sol
 cargo run
 ```
 
+### Overlay global
+
+El overlay de estado se compila de forma opcional porque requiere las bibliotecas
+de desarrollo GTK4 y GTK4 Layer Shell del sistema. Una vez instaladas, ejecuta:
+
+```bash
+sudo dnf install gtk4-devel gtk4-layer-shell-devel
+cargo run --features overlay
+```
+
+La OSD se ejecuta como un proceso separado del grabador, no toma foco y muestra
+los estados de armado, grabacion Push/Tap, latch, transcripcion, pegado y error.
+Si la feature no esta habilitada, la aplicacion principal sigue funcionando sin
+overlay y deja un aviso explicito en consola.
+
 ## Experimentos
 
 Los scripts de `experiments/prompt_tests/` usan la misma configuracion local y sirven para probar prompts de limpieza y transcripcion.

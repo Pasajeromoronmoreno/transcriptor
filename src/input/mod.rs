@@ -9,7 +9,10 @@ pub enum Mode {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Command {
+    BeginArming,
     StartRecording(Mode),
+    WaitForLatch,
+    LatchRecording,
     StopRecording,
     ToggleFormat,
     StopInvertedEnter,

@@ -4,6 +4,7 @@ mod audio;
 mod api;
 mod output;
 mod pipeline;
+mod overlay;
 
 use config::AppConfig;
 use input::{listener, state_machine};
@@ -15,11 +16,23 @@ use std::io::{self, Write};
 
 #[tokio::main]
 async fn main() {
+    if let Some(socket_path) = overlay_socket_arg() {
+        #[cfg(feature = "overlay")]
+        overlay::run_ui(&socket_path);
+
+        #[cfg(not(feature = "overlay"))]
+        let _ = socket_path;
+        #[cfg(not(feature = "overlay"))]
+        eprintln!("Overlay desactivado: compilá con `--features overlay`.");
+        return;
+    }
+
     let _ = dotenvy::dotenv();
 
     // Limpia instancias previas y procesos huérfanos para un inicio limpio.
     cleanup_old_processes();
     let config = AppConfig::load_from_file("config.toml");
+    let (overlay_hub, mut overlay_handle) = overlay::start().await;
     println!("🎙️ Transcriptor v0.6 — Robust Cimientos");
     println!("------------------------------------------------------------");
 
@@ -39,6 +52,9 @@ async fn main() {
         }
         Err(e) => {
             eprintln!("❌ Error de audio: {}", e);
+            if let Some(handle) = overlay_handle.take() {
+                handle.shutdown();
+            }
             return;
         }
     };
@@ -74,10 +90,24 @@ async fn main() {
         _ = signal::ctrl_c() => {
             println!("\n👋 Saliendo y limpiando...");
         }
-        _ = pipeline::robust::run(cmd_rx, mic_clone, cfg_final) => {
+        _ = pipeline::robust::run(cmd_rx, mic_clone, cfg_final, overlay_hub) => {
             println!("\n🛑 Pipeline detenido.");
         }
     }
+
+    if let Some(handle) = overlay_handle {
+        handle.shutdown();
+    }
+}
+
+fn overlay_socket_arg() -> Option<String> {
+    let mut args = std::env::args().skip(1);
+    while let Some(arg) = args.next() {
+        if arg == "--overlay" {
+            return args.next();
+        }
+    }
+    None
 }
 
 fn cleanup_old_processes() {

@@ -4,6 +4,7 @@ use aho_corasick::{AhoCorasick, MatchKind};
 use crate::audio::capture::HotMic;
 use crate::config::AppConfig;
 use crate::input::Command;
+use crate::overlay::{AppPhase, OverlayHub, RecordingMode};
 use crate::{api, output};
 use crate::pipeline::profile::PipelineProfiler;
 
@@ -14,21 +15,28 @@ pub async fn run(
     mut cmd_rx: mpsc::UnboundedReceiver<Command>,
     hot_mic: Arc<HotMic>,
     config: AppConfig,
+    overlay: OverlayHub,
 ) {
     let mut split_cancel: Option<oneshot::Sender<()>> = None;
     
     // Estados de sesión que pueden cambiar durante la grabación
     let mut session_add_period = config.add_period;
     let mut session_auto_enter: Option<bool> = None; // None = usa config global, Some = fuerza un valor
+    let mut session_mode: Option<RecordingMode> = None;
 
     while let Some(command) = cmd_rx.recv().await {
         match command {
-            Command::StartRecording(_) => {
+            Command::BeginArming => {
+                overlay.publish(AppPhase::Arming, None, None);
+            }
+            Command::StartRecording(mode) => {
                 session_add_period = config.add_period;
                 session_auto_enter = None;
+                session_mode = Some(mode.into());
 
                 if let Some(tx) = split_cancel.take() { let _ = tx.send(()); }
                 hot_mic.start_recording().await;
+                overlay.publish(AppPhase::Recording, session_mode, None);
                 println!("🎤 Grabando... [Punto Final: {}]", 
                     if session_add_period { "SI" } else { "NO" }
                 );
@@ -41,6 +49,13 @@ pub async fn run(
                 tokio::spawn(async move {
                     auto_split_monitor(mic, cfg, cancel_rx).await;
                 });
+            }
+            Command::WaitForLatch => {
+                overlay.publish(AppPhase::WaitingForLatch, session_mode, None);
+            }
+            Command::LatchRecording => {
+                session_mode = Some(RecordingMode::Tap);
+                overlay.publish(AppPhase::Recording, session_mode, None);
             }
             Command::ToggleFormat => {
                 session_add_period = !session_add_period;
@@ -57,6 +72,7 @@ pub async fn run(
 
                 let wav = hot_mic.stop_recording().await;
                 profiler.stamp("Frenar Grabación (Obtención de Audio)");
+                overlay.publish(AppPhase::Transcribing, session_mode, None);
 
                 if wav.len() > 8044 {
                     let forced_enter = session_auto_enter.unwrap();
@@ -71,15 +87,19 @@ pub async fn run(
                     match api::groq::transcribe_audio(&config.groq_api_key, wav, &config.groq_language, p).await {
                         Ok(text) => {
                             profiler.stamp("API Groq (Respuesta Recibida)");
+                            overlay.publish(AppPhase::Delivering, session_mode, None);
                             deliver_text(&text, &config, session_add_period, forced_enter, &mut profiler).await;
+                            overlay.publish(AppPhase::Idle, None, None);
                         }
                         Err(e) => {
                             eprintln!("❌ Error Groq: {}", e);
+                            overlay.publish(AppPhase::Error, None, Some("Error de transcripción".to_string()));
                             profiler.finish();
                         }
                     }
                 } else {
                     profiler.finish();
+                    overlay.publish(AppPhase::Idle, None, None);
                 }
             }
             Command::StopRecording => {
@@ -90,6 +110,7 @@ pub async fn run(
 
                 let wav = hot_mic.stop_recording().await;
                 profiler.stamp("Frenar Grabación (Obtención de Audio)");
+                overlay.publish(AppPhase::Transcribing, session_mode, None);
                 
                 if wav.len() > 8044 {
                     println!("🛑 Transcribiendo...");
@@ -106,15 +127,19 @@ pub async fn run(
                     match api::groq::transcribe_audio(&config.groq_api_key, wav, &config.groq_language, p).await {
                         Ok(text) => {
                             profiler.stamp("API Groq (Respuesta Recibida)");
+                            overlay.publish(AppPhase::Delivering, session_mode, None);
                             deliver_text(&text, &config, session_add_period, final_enter, &mut profiler).await;
+                            overlay.publish(AppPhase::Idle, None, None);
                         }
                         Err(e) => {
                             eprintln!("❌ Error Groq: {}", e);
+                            overlay.publish(AppPhase::Error, None, Some("Error de transcripción".to_string()));
                             profiler.finish();
                         }
                     }
                 } else {
                     profiler.finish();
+                    overlay.publish(AppPhase::Idle, None, None);
                 }
             }
             Command::IncreaseGain => {

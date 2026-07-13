@@ -23,6 +23,10 @@ impl HotMic {
             .arg("--channels=1")
             .arg("--latency-msec=30")
             .stdout(Stdio::piped())
+            // Audio capture is part of the background service, not a terminal
+            // job. Keep terminal-generated signals from killing parec while
+            // the global recording shortcut is being pressed.
+            .process_group(0)
             .kill_on_drop(true)
             .spawn()?;
 

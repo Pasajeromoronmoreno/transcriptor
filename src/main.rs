@@ -1,21 +1,44 @@
+mod api;
+mod audio;
 mod config;
 mod input;
-mod audio;
-mod api;
+mod observability;
 mod output;
-mod pipeline;
 mod overlay;
+mod pipeline;
 
 use config::AppConfig;
 use input::{listener, state_machine};
-use tokio::sync::mpsc;
+use std::io::{self, Write};
+use std::process::Command;
 use std::sync::Arc;
 use tokio::signal;
-use std::process::Command;
-use std::io::{self, Write};
+use tokio::sync::mpsc;
 
 #[tokio::main]
 async fn main() {
+    let _ = dotenvy::dotenv();
+    let config = AppConfig::load_from_file("config.toml");
+    let observability = match observability::init(&config.logging) {
+        Ok(observability) => observability,
+        Err(error) => {
+            eprintln!("No se pudo inicializar observabilidad: {error}");
+            return;
+        }
+    };
+
+    if let Some(path) = observability.effective_log_path() {
+        tracing::info!(log_path = %path.display(), "Logs persistentes disponibles");
+    } else {
+        tracing::info!("No hay archivo persistente de logs configurado");
+    }
+
+    if let Some(path) = config.config_path.as_deref() {
+        tracing::info!(config_path = %path.display(), "Configuración cargada");
+    } else {
+        tracing::warn!("No se encontró archivo de configuración; se usan valores por defecto");
+    }
+
     if let Some(socket_path) = overlay_socket_arg() {
         #[cfg(feature = "overlay")]
         overlay::run_ui(&socket_path);
@@ -23,11 +46,9 @@ async fn main() {
         #[cfg(not(feature = "overlay"))]
         let _ = socket_path;
         #[cfg(not(feature = "overlay"))]
-        eprintln!("Overlay desactivado: compilá con `--features overlay`.");
+        tracing::warn!("Overlay desactivado: compilá con `--features overlay`");
         return;
     }
-
-    let _ = dotenvy::dotenv();
 
     // This is a background application controlled by global evdev shortcuts.
     // A terminal must not be able to terminate it when the physical shortcut
@@ -36,14 +57,12 @@ async fn main() {
 
     // Limpia instancias previas y procesos huérfanos para un inicio limpio.
     cleanup_old_processes();
-    let config = AppConfig::load_from_file("config.toml");
     let (overlay_hub, mut overlay_handle) = overlay::start().await;
-    println!("🎙️ Transcriptor v0.6 — Robust Cimientos");
-    println!("------------------------------------------------------------");
+    tracing::info!(version = env!("CARGO_PKG_VERSION"), "Transcriptor iniciado");
 
     // Proactive cleanup: kill any other instances or parec orphans
     // (This is a safety measure against zombies reported by user)
-    
+
     // Inicializar teclado uinput
     output::typer::init();
 
@@ -52,11 +71,11 @@ async fn main() {
         Ok(mic) => {
             let m = Arc::new(mic);
             start_volume_monitor(m.clone());
-            println!("🔊 Audio listo.");
+            tracing::info!("Audio listo");
             m
         }
         Err(e) => {
-            eprintln!("❌ Error de audio: {}", e);
+            tracing::error!(error = %e, "Error iniciando audio");
             if let Some(handle) = overlay_handle.take() {
                 handle.shutdown();
             }
@@ -76,27 +95,40 @@ async fn main() {
         state_machine::run_state_machine(key_rx, cmd_tx, cfg_clone).await;
     });
 
-    println!("------------------------------------------------------------");
     if config.groq_api_key.is_empty() {
-        println!("⚠️ Configura tu API key en .env (GROQ_API_KEY) o en config.toml");
+        tracing::warn!("No hay API key configurada; define GROQ_API_KEY o config.toml");
     }
 
     let mut out_info = Vec::new();
-    if config.copy_to_clipboard { out_info.push("📋 clipboard"); }
-    if config.paste_to_input { out_info.push("⌨️ hardware_type"); }
-    println!("👉 {:?} + {:?} para grabar. Salida: {}", config.hotkey_modifier, config.hotkey_trigger, out_info.join(" + "));
-    println!("🔊 Ganancia: {:?} + {:?} (Subir) / {:?} (Bajar)", config.hotkey_modifier, config.hotkey_increase_gain, config.hotkey_decrease_gain);
+    if config.copy_to_clipboard {
+        out_info.push("📋 clipboard");
+    }
+    if config.paste_to_input {
+        out_info.push("⌨️ hardware_type");
+    }
+    tracing::info!(
+        modifier = ?config.hotkey_modifier,
+        trigger = ?config.hotkey_trigger,
+        output = %out_info.join(" + "),
+        "Atajo de grabación listo"
+    );
+    tracing::info!(
+        modifier = ?config.hotkey_modifier,
+        increase = ?config.hotkey_increase_gain,
+        decrease = ?config.hotkey_decrease_gain,
+        "Atajos de ganancia configurados"
+    );
 
     // Pipeline robusto
     let mic_clone = hot_mic.clone();
     let cfg_final = config.clone();
-    
+
     tokio::select! {
         _ = signal::ctrl_c() => {
-            println!("\n👋 Saliendo y limpiando...");
+            tracing::info!("Señal de salida recibida; limpiando");
         }
         _ = pipeline::robust::run(cmd_rx, mic_clone, cfg_final, overlay_hub) => {
-            println!("\n🛑 Pipeline detenido.");
+            tracing::info!("Pipeline detenido");
         }
     }
 
@@ -108,7 +140,8 @@ async fn main() {
 #[cfg(unix)]
 fn ignore_terminal_quit() {
     tokio::spawn(async {
-        let Ok(mut quit) = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::quit()) else {
+        let Ok(mut quit) = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::quit())
+        else {
             return;
         };
         while quit.recv().await.is_some() {}
@@ -130,13 +163,20 @@ fn overlay_socket_arg() -> Option<String> {
 
 fn cleanup_old_processes() {
     let current_pid = std::process::id();
-    
+
     // 1. Matar procesos parec huérfanos
-    let _ = Command::new("pkill").arg("-f").arg("parec --format=s16le").spawn();
+    let _ = Command::new("pkill")
+        .arg("-f")
+        .arg("parec --format=s16le")
+        .spawn();
 
     // 2. Matar otras instancias de transcriptor (excepto nosotros mismos)
     // Usamos pgrep para encontrar pids y los filtramos en el shell o aquí
-    if let Ok(output) = Command::new("pgrep").arg("-f").arg("target/debug/transcriptor").output() {
+    if let Ok(output) = Command::new("pgrep")
+        .arg("-f")
+        .arg("target/debug/transcriptor")
+        .output()
+    {
         let pids = String::from_utf8_lossy(&output.stdout);
         for pid_str in pids.lines() {
             if let Ok(pid) = pid_str.trim().parse::<u32>() {
@@ -155,19 +195,22 @@ fn start_volume_monitor(mic: Arc<audio::capture::HotMic>) {
             interval.tick().await;
             let vol = mic.get_volume();
             let mult = mic.get_multiplier();
-            
+
             // Escalar de 0-32767 a 20 niveles
             let bars = (vol as f32 / 32768.0 * 20.0).ceil() as usize;
             let bars_safe = bars.min(20);
             let bar_fill = "█".repeat(bars_safe);
             let bar_empty = "░".repeat(20 - bars_safe);
 
-            // Código ANSI: 
+            // Código ANSI:
             // \x1b[s  - Guardar posición cursor
             // \x1b[1;1H - Ir a línea 1, columna 1
             // \x1b[K  - Borrar línea actual
             // \x1b[u  - Restaurar cursor
-            print!("\x1b[s\x1b[1;1H\x1b[K\x1b[44;37m MONITOR \x1b[0m Vol: {:<5} (x{:.1}) [{}{}] \x1b[u", vol, mult, bar_fill, bar_empty);
+            print!(
+                "\x1b[s\x1b[1;1H\x1b[K\x1b[44;37m MONITOR \x1b[0m Vol: {:<5} (x{:.1}) [{}{}] \x1b[u",
+                vol, mult, bar_fill, bar_empty
+            );
             let _ = io::stdout().flush();
         }
     });

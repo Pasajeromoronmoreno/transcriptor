@@ -5,6 +5,14 @@ push_release_window_ms = 150
 # Multiplicador digital del volumen (por defecto 1.0)
 audio_multiplier = 14.0
 
+[logging]
+# Nivel por defecto; RUST_LOG lo puede sobrescribir temporalmente.
+level = "info"
+# Escribir además un archivo JSON diario en el estado de usuario.
+file = true
+# Días de retención de archivos de log rotados.
+retention_days = 7
+
 [groq]
 # Recomendado: guarda la API key en .env como GROQ_API_KEY.
 # Este campo queda como fallback local, pero puede quedar vacio.

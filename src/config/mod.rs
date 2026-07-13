@@ -1,9 +1,9 @@
-use serde::Deserialize;
-use std::fs;
-use std::time::Duration;
-use std::path::PathBuf;
 use evdev::KeyCode;
+use serde::Deserialize;
 use std::env;
+use std::fs;
+use std::path::PathBuf;
+use std::time::Duration;
 
 #[derive(Deserialize, Debug)]
 struct TomlConfig {
@@ -12,6 +12,7 @@ struct TomlConfig {
     output: Option<OutputToml>,
     pipeline: Option<PipelineToml>,
     hotkeys: Option<HotkeysToml>,
+    logging: Option<LoggingToml>,
 }
 
 #[derive(Deserialize, Debug)]
@@ -57,6 +58,30 @@ struct HotkeysToml {
     decrease_gain: Option<String>,
 }
 
+#[derive(Deserialize, Debug)]
+struct LoggingToml {
+    level: Option<String>,
+    file: Option<bool>,
+    retention_days: Option<u64>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct LoggingConfig {
+    pub level: String,
+    pub file: bool,
+    pub retention_days: u64,
+}
+
+impl Default for LoggingConfig {
+    fn default() -> Self {
+        Self {
+            level: "info".to_string(),
+            file: true,
+            retention_days: 7,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum PipelineMode {
     Robust,
@@ -91,6 +116,7 @@ pub struct AppConfig {
     pub dictionary: Vec<(String, String)>,
     pub dictionary_enabled: bool,
     pub config_path: Option<PathBuf>,
+    pub logging: LoggingConfig,
 }
 
 impl Default for AppConfig {
@@ -122,6 +148,7 @@ impl Default for AppConfig {
             dictionary: Vec::new(),
             dictionary_enabled: true,
             config_path: None,
+            logging: LoggingConfig::default(),
         }
     }
 }
@@ -130,9 +157,11 @@ impl AppConfig {
     pub fn load_from_file(filename: &str) -> Self {
         let mut config = Self::default();
 
-        let binary_dir = env::current_exe().ok()
+        let binary_dir = env::current_exe()
+            .ok()
             .and_then(|p| p.parent().map(|p| p.to_path_buf()));
-        let xdg_config = env::var("XDG_CONFIG_HOME").ok()
+        let xdg_config = env::var("XDG_CONFIG_HOME")
+            .ok()
             .or_else(|| env::var("HOME").ok().map(|h| format!("{}/.config", h)))
             .map(|d| PathBuf::from(d).join("transcriptor"));
         let cwd = env::current_dir().ok();
@@ -176,24 +205,52 @@ impl AppConfig {
         match toml::from_str::<TomlConfig>(contents) {
             Ok(t) => {
                 if let Some(input) = t.input {
-                    if let Some(v) = input.push_start_threshold_ms { config.push_start_threshold = Duration::from_millis(v); }
-                    if let Some(v) = input.tap_timeout_ms { config.tap_timeout = Duration::from_millis(v); }
-                    if let Some(v) = input.push_release_window_ms { config.push_release_window = Duration::from_millis(v); }
-                    if let Some(v) = input.audio_multiplier { config.audio_multiplier = v; }
+                    if let Some(v) = input.push_start_threshold_ms {
+                        config.push_start_threshold = Duration::from_millis(v);
+                    }
+                    if let Some(v) = input.tap_timeout_ms {
+                        config.tap_timeout = Duration::from_millis(v);
+                    }
+                    if let Some(v) = input.push_release_window_ms {
+                        config.push_release_window = Duration::from_millis(v);
+                    }
+                    if let Some(v) = input.audio_multiplier {
+                        config.audio_multiplier = v;
+                    }
                 }
                 if let Some(groq) = t.groq {
-                    if let Some(v) = groq.api_key { config.groq_api_key = v; }
-                    if let Some(v) = groq.language { config.groq_language = v; }
-                    if let Some(v) = groq.whisper_prompt { config.whisper_prompt = v; }
-                    if let Some(v) = groq.experimental_live { config.experimental_live = v; }
+                    if let Some(v) = groq.api_key {
+                        config.groq_api_key = v;
+                    }
+                    if let Some(v) = groq.language {
+                        config.groq_language = v;
+                    }
+                    if let Some(v) = groq.whisper_prompt {
+                        config.whisper_prompt = v;
+                    }
+                    if let Some(v) = groq.experimental_live {
+                        config.experimental_live = v;
+                    }
                 }
                 if let Some(out) = t.output {
-                    if let Some(v) = out.copy_to_clipboard { config.copy_to_clipboard = v; }
-                    if let Some(v) = out.paste_to_input { config.paste_to_input = v; }
-                    if let Some(v) = out.auto_enter { config.auto_enter = v; }
-                    if let Some(v) = out.auto_enter_delay_ms { config.auto_enter_delay = Duration::from_millis(v); }
-                    if let Some(v) = out.add_period { config.add_period = v; }
-                    if let Some(v) = out.export_audio { config.export_audio = v; }
+                    if let Some(v) = out.copy_to_clipboard {
+                        config.copy_to_clipboard = v;
+                    }
+                    if let Some(v) = out.paste_to_input {
+                        config.paste_to_input = v;
+                    }
+                    if let Some(v) = out.auto_enter {
+                        config.auto_enter = v;
+                    }
+                    if let Some(v) = out.auto_enter_delay_ms {
+                        config.auto_enter_delay = Duration::from_millis(v);
+                    }
+                    if let Some(v) = out.add_period {
+                        config.add_period = v;
+                    }
+                    if let Some(v) = out.export_audio {
+                        config.export_audio = v;
+                    }
                 }
                 if let Some(pipe) = t.pipeline {
                     if let Some(v) = pipe.mode {
@@ -202,23 +259,63 @@ impl AppConfig {
                             _ => PipelineMode::Robust,
                         };
                     }
-                    if let Some(v) = pipe.chunk_window_ms { config.chunk_window = Duration::from_millis(v); }
-                    if let Some(v) = pipe.profile_latency { config.profile_latency = v; }
+                    if let Some(v) = pipe.chunk_window_ms {
+                        config.chunk_window = Duration::from_millis(v);
+                    }
+                    if let Some(v) = pipe.profile_latency {
+                        config.profile_latency = v;
+                    }
                 }
                 if let Some(hot) = t.hotkeys {
-                    if let Some(v) = hot.modifier { if let Some(k) = parse_keycode(&v) { config.hotkey_modifier = k; } }
-                    if let Some(v) = hot.trigger { if let Some(k) = parse_keycode(&v) { config.hotkey_trigger = k; } }
-                    if let Some(v) = hot.toggle_format { if let Some(k) = parse_keycode(&v) { config.hotkey_toggle_format = k; } }
-                    if let Some(v) = hot.send_with_enter { if let Some(k) = parse_keycode(&v) { config.hotkey_send_with_enter = k; } }
-                    if let Some(v) = hot.increase_gain { if let Some(k) = parse_keycode(&v) { config.hotkey_increase_gain = k; } }
-                    if let Some(v) = hot.decrease_gain { if let Some(k) = parse_keycode(&v) { config.hotkey_decrease_gain = k; } }
+                    if let Some(v) = hot.modifier {
+                        if let Some(k) = parse_keycode(&v) {
+                            config.hotkey_modifier = k;
+                        }
+                    }
+                    if let Some(v) = hot.trigger {
+                        if let Some(k) = parse_keycode(&v) {
+                            config.hotkey_trigger = k;
+                        }
+                    }
+                    if let Some(v) = hot.toggle_format {
+                        if let Some(k) = parse_keycode(&v) {
+                            config.hotkey_toggle_format = k;
+                        }
+                    }
+                    if let Some(v) = hot.send_with_enter {
+                        if let Some(k) = parse_keycode(&v) {
+                            config.hotkey_send_with_enter = k;
+                        }
+                    }
+                    if let Some(v) = hot.increase_gain {
+                        if let Some(k) = parse_keycode(&v) {
+                            config.hotkey_increase_gain = k;
+                        }
+                    }
+                    if let Some(v) = hot.decrease_gain {
+                        if let Some(k) = parse_keycode(&v) {
+                            config.hotkey_decrease_gain = k;
+                        }
+                    }
                 } else {
-                    println!("⚠️ No se encontró sección [hotkeys] en el archivo.");
+                    eprintln!("⚠️ No se encontró sección [hotkeys] en el archivo.");
+                }
+                if let Some(logging) = t.logging {
+                    if let Some(v) = logging.level {
+                        config.logging.level = v;
+                    }
+                    if let Some(v) = logging.file {
+                        config.logging.file = v;
+                    }
+                    if let Some(v) = logging.retention_days {
+                        config.logging.retention_days = v;
+                    }
                 }
 
                 // Cargar diccionario de reemplazos
                 config.dictionary_enabled = true;
-                if let Some(table) = toml::from_str::<toml::Value>(contents).ok()
+                if let Some(table) = toml::from_str::<toml::Value>(contents)
+                    .ok()
                     .and_then(|v| v.get("dictionary").cloned())
                     .and_then(|v| v.as_table().cloned())
                 {
@@ -226,7 +323,8 @@ impl AppConfig {
                         config.dictionary_enabled = enabled;
                     }
 
-                    let mut dict: Vec<(String, String)> = table.into_iter()
+                    let mut dict: Vec<(String, String)> = table
+                        .into_iter()
                         .filter_map(|(k, v)| {
                             if k == "enabled" {
                                 return None;
@@ -242,17 +340,20 @@ impl AppConfig {
                 }
             }
             Err(e) => {
-                eprintln!("❌ Error parseando TOML: {}", e);
+                eprintln!("❌ Error parseando TOML: {e}");
             }
         }
     }
 
-    pub fn save_audio_multiplier(config_path: Option<&std::path::Path>, gain: f32) -> Result<(), std::io::Error> {
+    pub fn save_audio_multiplier(
+        config_path: Option<&std::path::Path>,
+        gain: f32,
+    ) -> Result<(), std::io::Error> {
         let full_path = match config_path {
             Some(p) => p.to_path_buf(),
             None => env::current_dir().unwrap_or_default().join("config.toml"),
         };
-        
+
         if let Ok(contents) = fs::read_to_string(&full_path) {
             let mut new_contents = String::new();
             let mut in_input = false;
@@ -343,8 +444,39 @@ fn parse_keycode(name: &str) -> Option<KeyCode> {
         "KEY_LEFTCTRL" => Some(KeyCode::KEY_LEFTCTRL),
         "KEY_RIGHTCTRL" => Some(KeyCode::KEY_RIGHTCTRL),
         _ => {
-            eprintln!("⚠️ Tecla no reconocida: {}. Usando default.", name);
+            eprintln!("⚠️ Tecla no reconocida: {name}. Usando default.");
             None
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{AppConfig, LoggingConfig};
+
+    #[test]
+    fn logging_defaults_are_stable() {
+        assert_eq!(AppConfig::default().logging, LoggingConfig::default());
+        assert_eq!(AppConfig::default().logging.level, "info");
+        assert!(AppConfig::default().logging.file);
+        assert_eq!(AppConfig::default().logging.retention_days, 7);
+    }
+
+    #[test]
+    fn logging_section_is_optional_and_overridable() {
+        let mut config = AppConfig::default();
+        AppConfig::parse_toml(
+            r#"
+                [logging]
+                level = "debug,transcriptor=trace"
+                file = false
+                retention_days = 21
+            "#,
+            &mut config,
+        );
+
+        assert_eq!(config.logging.level, "debug,transcriptor=trace");
+        assert!(!config.logging.file);
+        assert_eq!(config.logging.retention_days, 21);
     }
 }

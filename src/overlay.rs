@@ -269,6 +269,7 @@ mod ui {
             .default_width(360)
             .default_height(58)
             .build();
+        window.add_css_class("overlay-window");
         let label = Label::builder().label("Transcriptor").build();
         label.set_margin_top(12);
         label.set_margin_bottom(12);
@@ -278,7 +279,7 @@ mod ui {
 
         let css = CssProvider::new();
         css.load_from_data(
-            ".overlay { background: rgba(25, 25, 30, 0.92); border-radius: 14px; color: white; font-size: 16px; }\n.recording { color: #ff6b6b; }\n.processing { color: #8ab4f8; }\n.success { color: #81c995; }\n.error { color: #ff8a80; }",
+            ".overlay-window { background: transparent; }\n.overlay { background: rgba(25, 25, 30, 0.92); border-radius: 14px; color: white; font-size: 16px; }\n.recording { color: #ff6b6b; }\n.processing { color: #8ab4f8; }\n.success { color: #81c995; }\n.error { color: #ff8a80; }",
         );
         label.add_css_class("overlay");
         if let Some(display) = gtk4::gdk::Display::default() {

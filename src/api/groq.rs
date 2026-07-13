@@ -51,6 +51,15 @@ fn redact_body(mut body: String, api_key: &str, prompt: Option<&str>) -> String 
     body
 }
 
+fn truncate_body(mut body: String, limit: usize) -> String {
+    if body.len() > limit {
+        let mut boundary = limit;
+        while !body.is_char_boundary(boundary) { boundary -= 1; }
+        body.truncate(boundary);
+    }
+    body
+}
+
 impl GroqClient {
     pub fn new(connect_timeout: Duration, request_timeout: Duration) -> Result<Self, TranscriptionError> {
         Self::with_endpoint(ENDPOINT, connect_timeout, request_timeout)
@@ -73,7 +82,7 @@ impl GroqClient {
         let retry_after = response.headers().get(reqwest::header::RETRY_AFTER).and_then(|v| v.to_str().ok()).and_then(|v| v.parse::<u64>().ok()).map(Duration::from_secs);
         if !status.is_success() {
             let mut body = response.text().await.unwrap_or_else(|error| format!("<body unreadable: {error}>"));
-            body.truncate(1024);
+            body = truncate_body(body, 1024);
             body = redact_body(body, api_key, prompt);
             return Err(TranscriptionError::Http { status, request_id, body, retry_after });
         }
@@ -95,5 +104,11 @@ mod tests {
     fn provider_body_redacts_secrets() {
         let body = redact_body("key=secret prompt=private".into(), "secret", Some("private"));
         assert!(!body.contains("secret")); assert!(!body.contains("private"));
+    }
+    #[test]
+    fn provider_body_truncates_unicode_safely() {
+        let body = truncate_body("á".repeat(600), 1024);
+        assert!(body.len() <= 1024);
+        assert!(body.is_char_boundary(body.len()));
     }
 }

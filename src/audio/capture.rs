@@ -30,7 +30,7 @@ impl HotMic {
             .kill_on_drop(true)
             .spawn()?;
 
-        let mut stdout = child.stdout.take().expect("Stdout parec fail");
+        let mut stdout = child.stdout.take().ok_or("parec no expuso stdout")?;
         let buffer = Arc::new(Mutex::new(Vec::with_capacity(32000 * 60))); // ~1 min pre-alloc
         let buffer_clone = buffer.clone();
         let is_recording = Arc::new(AtomicBool::new(false));

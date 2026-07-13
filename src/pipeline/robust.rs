@@ -155,8 +155,9 @@ async fn finish_recording(session_id: u64, hot_mic: &HotMic, config: &AppConfig,
 enum DeliveryError {
     #[error("clipboard: {0}")] Clipboard(String),
     #[error("uinput: {0}")] Uinput(String),
+    #[error("diccionario: {0}")] Dictionary(String),
 }
-impl DeliveryError { fn code(&self) -> &'static str { match self { Self::Clipboard(_) => "TRN-OUTPUT-CLIPBOARD", Self::Uinput(_) => "TRN-OUTPUT-UINPUT" } } }
+impl DeliveryError { fn code(&self) -> &'static str { match self { Self::Clipboard(_) => "TRN-OUTPUT-CLIPBOARD", Self::Uinput(_) => "TRN-OUTPUT-UINPUT", Self::Dictionary(_) => "TRN-DICTIONARY-BUILD" } } }
 
 async fn deliver_text(text: &str, config: &AppConfig, add_period: bool, auto_enter: bool, profiler: &mut PipelineProfiler) -> Result<(), DeliveryError> {
     let mut final_text = text.trim().to_string();
@@ -170,7 +171,7 @@ async fn deliver_text(text: &str, config: &AppConfig, add_period: bool, auto_ent
         let ac = AhoCorasick::builder()
             .match_kind(MatchKind::LeftmostLongest)
             .build(&patterns)
-            .expect("build Aho-Corasick automaton");
+            .map_err(|error| DeliveryError::Dictionary(error.to_string()))?;
 
         let lower_input = final_text.to_lowercase();
         let mut result = String::with_capacity(final_text.len());

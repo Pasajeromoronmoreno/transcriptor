@@ -5,26 +5,15 @@ lazy_static::lazy_static! {
     static ref DEVICE: Mutex<Option<uinput::Device>> = Mutex::new(None);
 }
 
-pub fn init() {
-    let mut guard = DEVICE.lock().unwrap();
+pub fn init() -> Result<(), String> {
+    let mut guard = DEVICE.lock().map_err(|_| "uinput lock poisoned".to_string())?;
     if guard.is_none() {
-        match uinput::default() {
-            Ok(builder) => {
-                match builder
-                    .name("Transcriptor Virtual Hardware")
-                    .expect("Fallo nombre")
-                    .event(uinput::event::Keyboard::All)
-                    .expect("Fallo registro")
-                    .create() {
-                    Ok(dev) => {
-                        *guard = Some(dev);
-                    }
-                    Err(e) => tracing::error!(code="TRN-OUTPUT-UINPUT", error=%e, "Error creando uinput; comprueba permisos"),
-                }
-            }
-            Err(e) => tracing::error!(code="TRN-OUTPUT-UINPUT", error=%e, "Error creando el builder uinput"),
-        }
+        let builder = uinput::default().map_err(|e| e.to_string())?;
+        let builder = builder.name("Transcriptor Virtual Hardware").map_err(|e| e.to_string())?;
+        let builder = builder.event(uinput::event::Keyboard::All).map_err(|e| e.to_string())?;
+        *guard = Some(builder.create().map_err(|e| e.to_string())?);
     }
+    Ok(())
 }
 
 /// Envía Shift+Insert para pegar el contenido del portapapeles.
@@ -37,18 +26,21 @@ pub fn init() {
 pub fn paste_from_clipboard() -> Result<(), String> {
     let mut guard = DEVICE.lock().map_err(|_| "uinput lock poisoned".to_string())?;
     if let Some(dev) = guard.as_mut() {
-            // Aseguramos que no haya basura de modificadores virtuales
-            let _ = dev.release(&keyboard::Key::LeftControl);
-            let _ = dev.release(&keyboard::Key::LeftShift);
-            let _ = dev.release(&keyboard::Key::LeftAlt);
-            let _ = dev.synchronize();
+        // Aseguramos que no haya basura de modificadores virtuales
+        dev.release(&keyboard::Key::LeftControl).map_err(|e| e.to_string())?;
+        dev.release(&keyboard::Key::LeftShift).map_err(|e| e.to_string())?;
+        dev.release(&keyboard::Key::LeftAlt).map_err(|e| e.to_string())?;
+        dev.synchronize().map_err(|e| e.to_string())?;
 
-            // Ejecutamos Shift+Insert (estándar CUA, cross-platform)
-            let _ = dev.press(&keyboard::Key::LeftShift);
-            let _ = dev.click(&keyboard::Key::Insert);
-            let _ = dev.release(&keyboard::Key::LeftShift);
-            dev.synchronize().map_err(|e| e.to_string())?;
-            return Ok(());
+        // Liberamos Shift incluso si falla el click para no dejar una tecla virtual pegada.
+        dev.press(&keyboard::Key::LeftShift).map_err(|e| e.to_string())?;
+        let click = dev.click(&keyboard::Key::Insert).map_err(|e| e.to_string());
+        let release = dev.release(&keyboard::Key::LeftShift).map_err(|e| e.to_string());
+        let sync = dev.synchronize().map_err(|e| e.to_string());
+        click?;
+        release?;
+        sync?;
+        return Ok(());
     }
     Err("uinput device unavailable".to_string())
 }

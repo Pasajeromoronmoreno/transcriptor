@@ -9,11 +9,7 @@ where F: FnMut(u32, u32, Duration, &TranscriptionError) {
         match client.transcribe_once(api_key, wav, language, prompt).await {
             Ok(text) => return Ok(text),
             Err(error) if error.retryable() && attempt < max_attempts => {
-                let multiplier = 1u32.checked_shl(attempt - 1).unwrap_or(u32::MAX);
-                let base = retry.initial_delay.saturating_mul(multiplier).min(retry.max_delay);
-                let cap = retry.jitter.as_millis() as u64;
-                let jitter = if cap == 0 { Duration::ZERO } else { Duration::from_millis(crate::overlay::now_ms().unwrap_or(0) % (cap + 1)) };
-                let delay = error.retry_after().unwrap_or(base.saturating_add(jitter));
+                let delay = retry_delay(retry, attempt, &error);
                 tracing::warn!(code=error.code(), attempt, max_attempts, delay_ms=delay.as_millis() as u64, status=error.status(), request_id=error.request_id(), error=%error, error_chain=%crate::observability::error_chain(&error), "Fallo transitorio de transcripción; se reintentará");
                 on_retry(attempt + 1, max_attempts, delay, &error);
                 tokio::time::sleep(delay).await;
@@ -24,11 +20,20 @@ where F: FnMut(u32, u32, Duration, &TranscriptionError) {
     unreachable!()
 }
 
+fn retry_delay(retry: &RetryConfig, attempt: u32, error: &TranscriptionError) -> Duration {
+    let multiplier = 1u32.checked_shl(attempt - 1).unwrap_or(u32::MAX);
+    let base = retry.initial_delay.saturating_mul(multiplier).min(retry.max_delay);
+    let cap = retry.jitter.as_millis() as u64;
+    let jitter = if cap == 0 { Duration::ZERO } else { Duration::from_millis(crate::overlay::now_ms().unwrap_or(0) % (cap + 1)) };
+    error.retry_after().unwrap_or(base.saturating_add(jitter)).min(retry.max_delay)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
     use tokio::{io::{AsyncReadExt, AsyncWriteExt}, net::TcpListener};
+    use reqwest::StatusCode;
 
     fn fast_policy() -> RetryConfig { RetryConfig { max_attempts: 3, initial_delay: Duration::ZERO, max_delay: Duration::ZERO, jitter: Duration::ZERO } }
     async fn server(statuses: Vec<u16>) -> (GroqClient, Arc<AtomicUsize>) {
@@ -82,5 +87,11 @@ mod tests {
         let client = GroqClient::with_endpoint(&endpoint, Duration::from_secs(1), Duration::from_millis(30)).unwrap();
         assert_eq!(transcribe(&client, &fast_policy(), "secret", b"wav", "es", None, |_,_,_,_|{}).await.unwrap(), "recuperado");
         assert_eq!(count.load(Ordering::SeqCst), 2);
+    }
+    #[test]
+    fn retry_after_cannot_exceed_configured_maximum() {
+        let error = TranscriptionError::Http { status: StatusCode::TOO_MANY_REQUESTS, request_id: None, body: String::new(), retry_after: Some(Duration::from_secs(999)) };
+        let policy = RetryConfig { max_attempts: 3, initial_delay: Duration::from_secs(1), max_delay: Duration::from_secs(5), jitter: Duration::ZERO };
+        assert_eq!(retry_delay(&policy, 1, &error), Duration::from_secs(5));
     }
 }

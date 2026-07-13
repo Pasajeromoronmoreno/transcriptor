@@ -21,7 +21,7 @@ El sistema debe mantener la consola útil durante el desarrollo, persistir logs
 rotados para diagnóstico posterior y alimentar al overlay con mensajes breves.
 Nunca debe registrar API keys, audio, prompts completos ni transcripciones.
 
-## Estado actual auditado
+## Estado previo auditado
 
 La aplicación no tiene una capa de logging. Usa `println!` y `eprintln!` sin
 timestamp, nivel, módulo, identificador de sesión ni archivo persistente.

@@ -209,11 +209,14 @@ impl AppConfig {
 
         for opt_path in &search_locations {
             if let Some(path) = opt_path {
-                if let Ok(contents) = fs::read_to_string(path) {
-                    loaded_path = Some(path.clone());
-
-                    Self::parse_toml(&contents, &mut config);
-                    break;
+                match fs::read_to_string(path) {
+                    Ok(contents) => {
+                        loaded_path = Some(path.clone());
+                        Self::parse_toml(&contents, &mut config);
+                        break;
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => config.startup_warnings.push(format!("No se pudo leer {}: {error}", path.display())),
                 }
             }
         }
@@ -300,36 +303,20 @@ impl AppConfig {
                     }
                 }
                 if let Some(hot) = t.hotkeys {
-                    if let Some(v) = hot.modifier {
-                        if let Some(k) = parse_keycode(&v) {
-                            config.hotkey_modifier = k;
-                        }
+                    macro_rules! apply_key {
+                        ($value:expr, $target:expr) => {
+                            if let Some(value) = $value {
+                                if let Some(key) = parse_keycode(&value) { $target = key; }
+                                else { config.startup_warnings.push(format!("Tecla no reconocida: {value}; se usa el valor por defecto")); }
+                            }
+                        };
                     }
-                    if let Some(v) = hot.trigger {
-                        if let Some(k) = parse_keycode(&v) {
-                            config.hotkey_trigger = k;
-                        }
-                    }
-                    if let Some(v) = hot.toggle_format {
-                        if let Some(k) = parse_keycode(&v) {
-                            config.hotkey_toggle_format = k;
-                        }
-                    }
-                    if let Some(v) = hot.send_with_enter {
-                        if let Some(k) = parse_keycode(&v) {
-                            config.hotkey_send_with_enter = k;
-                        }
-                    }
-                    if let Some(v) = hot.increase_gain {
-                        if let Some(k) = parse_keycode(&v) {
-                            config.hotkey_increase_gain = k;
-                        }
-                    }
-                    if let Some(v) = hot.decrease_gain {
-                        if let Some(k) = parse_keycode(&v) {
-                            config.hotkey_decrease_gain = k;
-                        }
-                    }
+                    apply_key!(hot.modifier, config.hotkey_modifier);
+                    apply_key!(hot.trigger, config.hotkey_trigger);
+                    apply_key!(hot.toggle_format, config.hotkey_toggle_format);
+                    apply_key!(hot.send_with_enter, config.hotkey_send_with_enter);
+                    apply_key!(hot.increase_gain, config.hotkey_increase_gain);
+                    apply_key!(hot.decrease_gain, config.hotkey_decrease_gain);
                 } else {
                     config.startup_warnings.push("No se encontró sección [hotkeys] en el archivo".into());
                 }
@@ -478,16 +465,14 @@ fn parse_keycode(name: &str) -> Option<KeyCode> {
         "KEY_RIGHTSHIFT" => Some(KeyCode::KEY_RIGHTSHIFT),
         "KEY_LEFTCTRL" => Some(KeyCode::KEY_LEFTCTRL),
         "KEY_RIGHTCTRL" => Some(KeyCode::KEY_RIGHTCTRL),
-        _ => {
-            eprintln!("⚠️ Tecla no reconocida: {name}. Usando default.");
-            None
-        }
+        _ => None,
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{AppConfig, LoggingConfig};
+    use evdev::KeyCode;
 
     #[test]
     fn logging_defaults_are_stable() {
@@ -532,5 +517,13 @@ mod tests {
         assert_eq!(config.retry.initial_delay, std::time::Duration::from_millis(25));
         assert_eq!(config.groq_connect_timeout, std::time::Duration::from_millis(200));
         assert_eq!(config.groq_request_timeout, std::time::Duration::from_millis(900));
+    }
+
+    #[test]
+    fn invalid_hotkey_is_preserved_as_startup_diagnostic() {
+        let mut config = AppConfig::default();
+        AppConfig::parse_toml("[hotkeys]\nmodifier = \"KEY_DOES_NOT_EXIST\"", &mut config);
+        assert_eq!(config.hotkey_modifier, KeyCode::KEY_LEFTCTRL);
+        assert!(config.startup_warnings.iter().any(|warning| warning.contains("KEY_DOES_NOT_EXIST")));
     }
 }

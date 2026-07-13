@@ -71,7 +71,9 @@ async fn main() {
     // (This is a safety measure against zombies reported by user)
 
     // Inicializar teclado uinput
-    output::typer::init();
+    if let Err(error) = output::typer::init() {
+        tracing::error!(code="TRN-OUTPUT-UINPUT", error=%error, "No se pudo inicializar el teclado virtual");
+    }
 
     // Iniciar captura de audio
     let hot_mic = match audio::capture::HotMic::start(config.audio_multiplier).await {
@@ -181,11 +183,11 @@ fn cleanup_old_processes() {
 
     // 2. Matar otras instancias de transcriptor (excepto nosotros mismos)
     // Usamos pgrep para encontrar pids y los filtramos en el shell o aquí
-    if let Ok(output) = Command::new("pgrep")
+    match Command::new("pgrep")
         .arg("-f")
         .arg("target/debug/transcriptor")
-        .output()
-    {
+        .output() {
+      Ok(output) => {
         let pids = String::from_utf8_lossy(&output.stdout);
         for pid_str in pids.lines() {
             if let Ok(pid) = pid_str.trim().parse::<u32>() {
@@ -196,6 +198,8 @@ fn cleanup_old_processes() {
                 }
             }
         }
+      }
+      Err(error) => tracing::warn!(code="TRN-CLEANUP-PROCESS", error=%error, "No se pudo consultar instancias anteriores"),
     }
 }
 

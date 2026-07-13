@@ -373,4 +373,15 @@ mod tests {
         assert_eq!(status.mode, None);
         assert_eq!(status.started_at_ms, None);
     }
+
+    #[test]
+    fn retry_state_exposes_attempt_to_ui() {
+        let hub = OverlayHub::new();
+        let mut rx = hub.subscribe();
+        hub.publish(AppPhase::Retrying, Some(RecordingMode::Tap), Some("Problema de red · reintentando 2/3…".into()));
+        let status = rx.borrow_and_update().clone();
+        assert_eq!(status.phase, AppPhase::Retrying);
+        assert_eq!(status.message.as_deref(), Some("Problema de red · reintentando 2/3…"));
+        assert!(serde_json::to_string(&status).unwrap().contains("retrying"));
+    }
 }

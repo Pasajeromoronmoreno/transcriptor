@@ -17,6 +17,19 @@ use tokio::sync::mpsc;
 
 #[tokio::main]
 async fn main() {
+    // El proceso GTK auxiliar no abre su propio logger: el proceso principal
+    // es el dueño exclusivo del archivo persistente.
+    if let Some(socket_path) = overlay_socket_arg() {
+        #[cfg(feature = "overlay")]
+        overlay::run_ui(&socket_path);
+
+        #[cfg(not(feature = "overlay"))]
+        let _ = socket_path;
+        #[cfg(not(feature = "overlay"))]
+        eprintln!("Overlay desactivado: compilá con `--features overlay`.");
+        return;
+    }
+
     let _ = dotenvy::dotenv();
     let config = AppConfig::load_from_file("config.toml");
     let observability = match observability::init(&config.logging) {
@@ -38,17 +51,10 @@ async fn main() {
     } else {
         tracing::warn!("No se encontró archivo de configuración; se usan valores por defecto");
     }
-
-    if let Some(socket_path) = overlay_socket_arg() {
-        #[cfg(feature = "overlay")]
-        overlay::run_ui(&socket_path);
-
-        #[cfg(not(feature = "overlay"))]
-        let _ = socket_path;
-        #[cfg(not(feature = "overlay"))]
-        tracing::warn!("Overlay desactivado: compilá con `--features overlay`");
-        return;
+    for warning in &config.startup_warnings {
+        tracing::warn!(code="TRN-CONFIG-PARSE", detail=%warning, "Diagnóstico de configuración");
     }
+    tracing::info!(replacements=config.dictionary.len(), enabled=config.dictionary_enabled, "Diccionario configurado");
 
     // This is a background application controlled by global evdev shortcuts.
     // A terminal must not be able to terminate it when the physical shortcut

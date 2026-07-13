@@ -145,6 +145,7 @@ pub struct AppConfig {
     pub retry: RetryConfig,
     pub groq_connect_timeout: Duration,
     pub groq_request_timeout: Duration,
+    pub startup_warnings: Vec<String>,
 }
 
 impl Default for AppConfig {
@@ -180,6 +181,7 @@ impl Default for AppConfig {
             retry: RetryConfig::default(),
             groq_connect_timeout: Duration::from_millis(5000),
             groq_request_timeout: Duration::from_millis(30000),
+            startup_warnings: Vec::new(),
         }
     }
 }
@@ -208,7 +210,6 @@ impl AppConfig {
         for opt_path in &search_locations {
             if let Some(path) = opt_path {
                 if let Ok(contents) = fs::read_to_string(path) {
-                    println!("🔍 Configuración cargada desde: {:?}", path);
                     loaded_path = Some(path.clone());
 
                     Self::parse_toml(&contents, &mut config);
@@ -218,7 +219,6 @@ impl AppConfig {
         }
 
         if loaded_path.is_none() {
-            eprintln!("⚠️ No se encontró archivo de configuración. Usando valores por defecto.");
         }
 
         config.config_path = loaded_path;
@@ -331,7 +331,7 @@ impl AppConfig {
                         }
                     }
                 } else {
-                    eprintln!("⚠️ No se encontró sección [hotkeys] en el archivo.");
+                    config.startup_warnings.push("No se encontró sección [hotkeys] en el archivo".into());
                 }
                 if let Some(logging) = t.logging {
                     if let Some(v) = logging.level {
@@ -372,14 +372,11 @@ impl AppConfig {
                         })
                         .collect();
                     dict.sort_by(|a, b| b.0.len().cmp(&a.0.len()));
-                    if !dict.is_empty() {
-                        println!("📖 Diccionario cargado: {} reemplazos (Habilitado: {})", dict.len(), config.dictionary_enabled);
-                    }
                     config.dictionary = dict;
                 }
             }
             Err(e) => {
-                eprintln!("❌ Error parseando TOML: {e}");
+                config.startup_warnings.push(format!("Error parseando TOML: {e}"));
             }
         }
     }

@@ -177,7 +177,7 @@ mod tests {
             let mut buffer = [0u8; 8192];
             let _ = first.read(&mut buffer).await;
             seen.fetch_add(1, Ordering::SeqCst);
-            tokio::time::sleep(Duration::from_millis(80)).await;
+            tokio::time::sleep(Duration::from_millis(40)).await;
             drop(first);
             let (mut second, _) = listener.accept().await.unwrap();
             let _ = second.read(&mut buffer).await;

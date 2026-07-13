@@ -247,7 +247,11 @@ mod ui {
             .application_id("local.transcriptor.Overlay")
             .build();
         app.connect_activate(move |app| build_window(app, status_rx.clone()));
-        app.run();
+        // The child process is launched with the private `--overlay` flag.
+        // Do not let GTK parse the parent application's arguments, otherwise
+        // GTK rejects the flag before the overlay window can start.
+        let args: [&str; 0] = [];
+        app.run_with_args(&args);
     }
 
     fn build_window(app: &Application, status_rx: Rc<RefCell<mpsc::Receiver<OverlayStatus>>>) {

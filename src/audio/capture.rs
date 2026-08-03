@@ -112,23 +112,23 @@ impl HotMic {
                                     let mult = f32::from_bits(audio_multiplier_clone.load(Ordering::Relaxed));
 
                                     let recording = is_recording_clone.load(Ordering::SeqCst);
+                                    // La puerta corre siempre, no sólo grabando:
+                                    // así el medidor refleja el filtrado en todo
+                                    // momento y sirve para calibrar sin tener que
+                                    // arrancar y cancelar un dictado de prueba.
+                                    // Es seguro en reposo porque `start_recording`
+                                    // resetea la puerta al arrancar: nada de lo
+                                    // que se mide acá contamina las estadísticas
+                                    // que se reportan al terminar un dictado real.
+                                    //
                                     // La puerta decide sobre la señal SIN amplificar.
                                     // Si mirara la amplificada, los umbrales medidos
                                     // dejarían de valer, y peor: cambiar la ganancia
                                     // en caliente movería el umbral efectivo sin que
                                     // nadie lo pida.
-                                    let kept = if recording {
-                                        gate_clone.lock().await.filter(raw)
-                                    } else {
-                                        Vec::new()
-                                    };
+                                    let kept = gate_clone.lock().await.filter(raw);
 
-                                    // Grabando, el medidor muestra lo que pasó la
-                                    // puerta: así se ve el filtrado actuando. En
-                                    // reposo muestra la entrada, que es lo único
-                                    // que hay para ver.
-                                    let shown = if recording { kept.as_slice() } else { raw };
-                                    let peak = amplify(shown, mult).chunks_exact(2)
+                                    let peak = amplify(&kept, mult).chunks_exact(2)
                                         .map(|c| i16::from_le_bytes([c[0], c[1]]).unsigned_abs())
                                         .max()
                                         .unwrap_or(0);
@@ -140,6 +140,13 @@ impl HotMic {
                                             b.extend_from_slice(&amplify(&kept, mult));
                                         }
                                     } else {
+                                        // El pre-roll guarda la señal CRUDA, no la
+                                        // ya filtrada: `start_recording` la vuelve
+                                        // a pasar por la puerta con el estado recién
+                                        // reseteado. Filtrar acá y de nuevo ahí
+                                        // pegaría fragmentos discontinuos como si
+                                        // fueran audio continuo.
+                                        //
                                         // Sólo se alimenta en reposo: hacerlo
                                         // durante la grabación haría que un
                                         // dictado encadenado arrastrara la cola

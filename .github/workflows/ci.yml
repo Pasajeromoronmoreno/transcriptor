@@ -1,0 +1,49 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    name: Build, tests y clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      # `libudev-dev` lo necesita `uinput-sys`.
+      #
+      # La feature `overlay` (activa por defecto) enlaza contra GTK4 Layer
+      # Shell, que no está empaquetado en la imagen del runner: no existe
+      # `libgtk4-layer-shell-dev` en Ubuntu 24.04. Por eso la CI compila con
+      # `--no-default-features`, que cubre config, pipeline, transcripción y
+      # observabilidad —donde vive toda la lógica y todos los tests—. El build
+      # del overlay se verifica localmente con `cargo build` a secas.
+      - name: Instalar dependencias del sistema
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config \
+            libudev-dev
+
+      - name: Build
+        run: cargo build --locked --no-default-features --all-targets
+
+      - name: Tests
+        run: cargo test --locked --no-default-features
+
+      # Sin `-D warnings` por ahora: el código actual arrastra avisos previos y
+      # no queremos que el primer PR arranque en rojo. Cuando esté limpio,
+      # agregar `-- -D warnings` para que los avisos bloqueen el merge.
+      - name: Clippy
+        run: cargo clippy --locked --no-default-features --all-targets

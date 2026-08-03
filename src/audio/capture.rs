@@ -8,6 +8,7 @@ use tokio::sync::{watch, Mutex};
 use tokio::process::ChildStdout;
 use std::time::Duration;
 use crate::audio::gate::NoiseGate;
+use crate::audio::preroll::PreRoll;
 use crate::config::GateConfig;
 
 /// Espera mínima y máxima entre intentos de relanzar `parec`. La progresión
@@ -56,6 +57,9 @@ pub struct HotMic {
     /// Existe siempre, incluso desactivada: apagada sólo observa, y esas
     /// mediciones son las que permiten elegir los umbrales.
     gate: Arc<Mutex<NoiseGate>>,
+    /// Audio anterior al atajo, para no perder el arranque de la primera
+    /// palabra cuando se empieza a hablar antes de apretar.
+    preroll: Arc<Mutex<PreRoll>>,
     health: watch::Receiver<CaptureHealth>,
     _kill_tx: mpsc::Sender<()>,
 }
@@ -65,6 +69,7 @@ impl HotMic {
         initial_multiplier: f32,
         capture_device: Option<&str>,
         gate_config: &GateConfig,
+        preroll_window: Duration,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let device = capture_device.map(str::to_owned);
         let (mut child, mut stdout) = spawn_parec(device.as_deref())?;
@@ -80,6 +85,8 @@ impl HotMic {
         let audio_multiplier_clone = audio_multiplier.clone();
         let gate = Arc::new(Mutex::new(NoiseGate::new(gate_config)));
         let gate_clone = gate.clone();
+        let preroll = Arc::new(Mutex::new(PreRoll::new(preroll_window)));
+        let preroll_clone = preroll.clone();
         
         let (kill_tx, mut kill_rx) = mpsc::channel::<()>(1);
 
@@ -127,9 +134,17 @@ impl HotMic {
                                         .unwrap_or(0);
                                     current_volume_clone.store(peak, Ordering::Relaxed);
 
-                                    if recording && !kept.is_empty() {
-                                        let mut b = buffer_clone.lock().await;
-                                        b.extend_from_slice(&amplify(&kept, mult));
+                                    if recording {
+                                        if !kept.is_empty() {
+                                            let mut b = buffer_clone.lock().await;
+                                            b.extend_from_slice(&amplify(&kept, mult));
+                                        }
+                                    } else {
+                                        // Sólo se alimenta en reposo: hacerlo
+                                        // durante la grabación haría que un
+                                        // dictado encadenado arrastrara la cola
+                                        // del anterior.
+                                        preroll_clone.lock().await.push(raw);
                                     }
                                 }
                                 Err(error) => {
@@ -182,7 +197,7 @@ impl HotMic {
             }
         });
 
-        Ok(HotMic { buffer, is_recording, current_volume, audio_multiplier, gate, health: health_rx, _kill_tx: kill_tx })
+        Ok(HotMic { buffer, is_recording, current_volume, audio_multiplier, gate, preroll, health: health_rx, _kill_tx: kill_tx })
     }
 
     pub fn get_volume(&self) -> u16 {
@@ -204,11 +219,24 @@ impl HotMic {
     }
 
     pub async fn start_recording(&self) {
+        let seed = self.preroll.lock().await.take();
+
         // La puerta se reinicia antes de habilitar la grabación: si arrancara
         // con el sostenimiento del dictado anterior, dejaría entrar el fondo.
-        self.gate.lock().await.reset();
+        // El pre-roll pasa por ella igual que el resto: si sólo trae silencio
+        // se descarta, y si trae el arranque de una palabra, se conserva.
+        let seeded = {
+            let mut gate = self.gate.lock().await;
+            gate.reset();
+            if seed.is_empty() { Vec::new() } else { gate.filter(&seed) }
+        };
+
         let mut b = self.buffer.lock().await;
         b.clear(); // Limpiar rastro anterior obligatoriamente
+        if !seeded.is_empty() {
+            let amplified = amplify(&seeded, self.get_multiplier());
+            b.extend_from_slice(&amplified);
+        }
         self.is_recording.store(true, Ordering::SeqCst);
     }
 
@@ -270,6 +298,9 @@ impl HotMic {
             gate.reset();
             stats
         };
+        // Al cancelar se tira también el pre-roll: es audio de este dictado
+        // abortado, no contexto para el siguiente.
+        self.preroll.lock().await.clear();
         if let Some(stats) = stats {
             tracing::info!(
                 windows = stats.windows,

@@ -24,6 +24,7 @@ struct InputToml {
     push_release_window_ms: Option<u64>,
     audio_multiplier: Option<f32>,
     device: Option<String>,
+    preroll_ms: Option<u64>,
 }
 
 #[derive(Deserialize, Debug)]
@@ -179,6 +180,8 @@ pub struct AppConfig {
     /// Dispositivo de captura para `parec`. `None` usa la fuente por defecto
     /// del sistema.
     pub capture_device: Option<String>,
+    /// Cuánto audio anterior al atajo se antepone al dictado. Cero lo desactiva.
+    pub preroll: Duration,
     pub gate: GateConfig,
     pub dictionary: Vec<(String, String)>,
     pub dictionary_enabled: bool,
@@ -217,6 +220,7 @@ impl Default for AppConfig {
             hotkey_decrease_gain: KeyCode::KEY_DOWN,
             audio_multiplier: 1.0,
             capture_device: None,
+            preroll: Duration::from_millis(300),
             gate: GateConfig::default(),
             dictionary: Vec::new(),
             dictionary_enabled: true,
@@ -327,6 +331,9 @@ impl AppConfig {
                         .device
                         .map(|value| value.trim().to_string())
                         .filter(|value| !value.is_empty());
+                    if let Some(v) = input.preroll_ms {
+                        config.preroll = Duration::from_millis(v);
+                    }
                 }
                 if let Some(groq) = t.groq {
                     if let Some(v) = groq.api_key {
@@ -651,6 +658,17 @@ mod tests {
 
         assert_eq!(config.gate.close_threshold_dbfs, -30.0);
         assert!(config.startup_warnings.iter().any(|w| w.contains("close_threshold_dbfs")));
+    }
+
+    #[test]
+    fn preroll_is_configurable_and_zero_disables_it() {
+        let mut config = AppConfig::default();
+        AppConfig::parse_toml("[input]\npreroll_ms = 500", &mut config);
+        assert_eq!(config.preroll, std::time::Duration::from_millis(500));
+
+        let mut off = AppConfig::default();
+        AppConfig::parse_toml("[input]\npreroll_ms = 0", &mut off);
+        assert_eq!(off.preroll, std::time::Duration::ZERO);
     }
 
     #[test]

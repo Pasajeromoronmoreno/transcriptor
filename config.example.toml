@@ -11,6 +11,17 @@ audio_multiplier = 14.0
 # Listar las disponibles con: pactl list short sources
 # device = "easyeffects_source"
 
+# Audio anterior al atajo que se antepone al dictado, en milisegundos.
+#
+# El micrófono está caliente de forma permanente, pero mientras no se graba
+# cada bloque se descarta. Quien empieza a hablar y aprieta la tecla una
+# fracción tarde pierde la primera sílaba; esta ventana la recupera.
+#
+# No aporta nada si se aprieta primero y se habla después: en ese caso el
+# pre-roll sólo contiene silencio, y la puerta de ruido lo descarta igual.
+# Cero lo desactiva.
+preroll_ms = 300
+
 # Puerta de ruido: descarta el audio que queda por debajo del umbral, para que
 # el ruido de fondo de las pausas no llegue a la transcripción.
 #

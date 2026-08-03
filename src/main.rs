@@ -94,6 +94,7 @@ async fn main() {
         config.audio_multiplier,
         config.capture_device.as_deref(),
         &config.gate,
+        config.preroll,
     )
     .await
     {
@@ -105,6 +106,7 @@ async fn main() {
                 gate = config.gate.enabled,
                 gate_open_dbfs = config.gate.open_threshold_dbfs,
                 gate_close_dbfs = config.gate.close_threshold_dbfs,
+                preroll_ms = config.preroll.as_millis() as u64,
                 "Audio listo"
             );
             m

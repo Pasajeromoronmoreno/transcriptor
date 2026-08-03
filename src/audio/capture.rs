@@ -4,9 +4,48 @@ use tokio::io::AsyncReadExt;
 use tokio::sync::mpsc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering, AtomicU16};
-use tokio::sync::Mutex;
+use tokio::sync::{watch, Mutex};
+use tokio::process::ChildStdout;
+use std::time::Duration;
 use crate::audio::gate::NoiseGate;
 use crate::config::GateConfig;
+
+/// Espera mínima y máxima entre intentos de relanzar `parec`. La progresión
+/// evita machacar al servidor de sonido mientras todavía se está reiniciando.
+const RESPAWN_MIN_BACKOFF: Duration = Duration::from_millis(250);
+const RESPAWN_MAX_BACKOFF: Duration = Duration::from_secs(10);
+
+/// Estado del capturador, para que la interfaz pueda avisar en vez de dejar a
+/// la aplicación viva pero sorda.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CaptureHealth {
+    Running,
+    Down,
+}
+
+fn spawn_parec(device: Option<&str>) -> std::io::Result<(tokio::process::Child, ChildStdout)> {
+    let mut command = Command::new("parec");
+    if let Some(device) = device {
+        command.arg(format!("--device={device}"));
+    }
+    let mut child = command
+        .arg("--format=s16le")
+        .arg("--rate=16000")
+        .arg("--channels=1")
+        .arg("--latency-msec=30")
+        .stdout(Stdio::piped())
+        // Audio capture is part of the background service, not a terminal
+        // job. Keep terminal-generated signals from killing parec while
+        // the global recording shortcut is being pressed.
+        .process_group(0)
+        .kill_on_drop(true)
+        .spawn()?;
+
+    let stdout = child.stdout.take().ok_or_else(|| {
+        std::io::Error::other("parec no expuso stdout")
+    })?;
+    Ok((child, stdout))
+}
 
 /// HotMic re-diseñado para ser 100% atómico.
 pub struct HotMic {
@@ -17,6 +56,7 @@ pub struct HotMic {
     /// Existe siempre, incluso desactivada: apagada sólo observa, y esas
     /// mediciones son las que permiten elegir los umbrales.
     gate: Arc<Mutex<NoiseGate>>,
+    health: watch::Receiver<CaptureHealth>,
     _kill_tx: mpsc::Sender<()>,
 }
 
@@ -26,24 +66,10 @@ impl HotMic {
         capture_device: Option<&str>,
         gate_config: &GateConfig,
     ) -> Result<Self, Box<dyn std::error::Error>> {
-        let mut command = Command::new("parec");
-        if let Some(device) = capture_device {
-            command.arg(format!("--device={device}"));
-        }
-        let mut child = command
-            .arg("--format=s16le")
-            .arg("--rate=16000")
-            .arg("--channels=1")
-            .arg("--latency-msec=30")
-            .stdout(Stdio::piped())
-            // Audio capture is part of the background service, not a terminal
-            // job. Keep terminal-generated signals from killing parec while
-            // the global recording shortcut is being pressed.
-            .process_group(0)
-            .kill_on_drop(true)
-            .spawn()?;
+        let device = capture_device.map(str::to_owned);
+        let (mut child, mut stdout) = spawn_parec(device.as_deref())?;
 
-        let mut stdout = child.stdout.take().ok_or("parec no expuso stdout")?;
+        let (health_tx, health_rx) = watch::channel(CaptureHealth::Running);
         let buffer = Arc::new(Mutex::new(Vec::with_capacity(32000 * 60))); // ~1 min pre-alloc
         let buffer_clone = buffer.clone();
         let is_recording = Arc::new(AtomicBool::new(false));
@@ -59,54 +85,114 @@ impl HotMic {
 
         tokio::spawn(async move {
             let mut temp_buf = [0u8; 4096];
-            loop {
-                tokio::select! {
-                    biased;
-                    _ = kill_rx.recv() => { let _ = child.kill().await; break; }
-                    result = stdout.read(&mut temp_buf) => {
-                        match result {
-                            Ok(0) => break,
-                            Ok(n) => {
-                                let raw = &temp_buf[..n];
-                                let mult = f32::from_bits(audio_multiplier_clone.load(Ordering::Relaxed));
+            let mut backoff = RESPAWN_MIN_BACKOFF;
 
-                                // El monitor muestra la señal ya amplificada,
-                                // que es la que el usuario regula con los atajos
-                                // de ganancia.
-                                let peak = amplify(raw, mult).chunks_exact(2)
-                                    .map(|c| i16::from_le_bytes([c[0], c[1]]).unsigned_abs())
-                                    .max()
-                                    .unwrap_or(0);
-                                current_volume_clone.store(peak, Ordering::Relaxed);
+            'capture: loop {
+                // Lectura del `parec` actual. Se sale de este loop cuando muere.
+                let died = loop {
+                    tokio::select! {
+                        biased;
+                        _ = kill_rx.recv() => {
+                            let _ = child.kill().await;
+                            break 'capture;
+                        }
+                        result = stdout.read(&mut temp_buf) => {
+                            match result {
+                                Ok(0) => break "el proceso cerró su salida",
+                                Ok(n) => {
+                                    backoff = RESPAWN_MIN_BACKOFF;
+                                    let raw = &temp_buf[..n];
+                                    let mult = f32::from_bits(audio_multiplier_clone.load(Ordering::Relaxed));
 
-                                if is_recording_clone.load(Ordering::SeqCst) {
+                                    let recording = is_recording_clone.load(Ordering::SeqCst);
                                     // La puerta decide sobre la señal SIN amplificar.
                                     // Si mirara la amplificada, los umbrales medidos
                                     // dejarían de valer, y peor: cambiar la ganancia
                                     // en caliente movería el umbral efectivo sin que
                                     // nadie lo pida.
-                                    let kept = gate_clone.lock().await.filter(raw);
-                                    if !kept.is_empty() {
+                                    let kept = if recording {
+                                        gate_clone.lock().await.filter(raw)
+                                    } else {
+                                        Vec::new()
+                                    };
+
+                                    // Grabando, el medidor muestra lo que pasó la
+                                    // puerta: así se ve el filtrado actuando. En
+                                    // reposo muestra la entrada, que es lo único
+                                    // que hay para ver.
+                                    let shown = if recording { kept.as_slice() } else { raw };
+                                    let peak = amplify(shown, mult).chunks_exact(2)
+                                        .map(|c| i16::from_le_bytes([c[0], c[1]]).unsigned_abs())
+                                        .max()
+                                        .unwrap_or(0);
+                                    current_volume_clone.store(peak, Ordering::Relaxed);
+
+                                    if recording && !kept.is_empty() {
                                         let mut b = buffer_clone.lock().await;
                                         b.extend_from_slice(&amplify(&kept, mult));
                                     }
                                 }
+                                Err(error) => {
+                                    tracing::error!(code="TRN-AUDIO-READ", error=%error, "Falló la lectura del capturador de audio");
+                                    break "falló la lectura";
+                                }
                             }
-                            Err(error) => {
-                                tracing::error!(code="TRN-AUDIO-READ", error=%error, "Falló la lectura del capturador de audio");
-                                break;
-                            }
+                        }
+                    }
+                };
+
+                // Antes se salía del loop y la aplicación quedaba sorda en
+                // silencio: overlay vivo, atajos andando, y nada que grabar.
+                tracing::error!(
+                    code = "TRN-AUDIO-DEAD",
+                    reason = died,
+                    retry_in_ms = backoff.as_millis() as u64,
+                    "La captura de audio murió; se reintenta"
+                );
+                let _ = health_tx.send(CaptureHealth::Down);
+                current_volume_clone.store(0, Ordering::Relaxed);
+
+                loop {
+                    tokio::select! {
+                        biased;
+                        _ = kill_rx.recv() => break 'capture,
+                        _ = tokio::time::sleep(backoff) => {}
+                    }
+                    match spawn_parec(device.as_deref()) {
+                        Ok((new_child, new_stdout)) => {
+                            child = new_child;
+                            stdout = new_stdout;
+                            tracing::info!(code = "TRN-AUDIO-RESPAWN", "La captura de audio se restableció");
+                            let _ = health_tx.send(CaptureHealth::Running);
+                            break;
+                        }
+                        Err(error) => {
+                            // El backoff evita machacar el servidor de sonido
+                            // mientras PipeWire todavía se está reiniciando.
+                            backoff = (backoff * 2).min(RESPAWN_MAX_BACKOFF);
+                            tracing::warn!(
+                                code = "TRN-AUDIO-RESPAWN",
+                                error = %error,
+                                retry_in_ms = backoff.as_millis() as u64,
+                                "No se pudo relanzar la captura"
+                            );
                         }
                     }
                 }
             }
         });
 
-        Ok(HotMic { buffer, is_recording, current_volume, audio_multiplier, gate, _kill_tx: kill_tx })
+        Ok(HotMic { buffer, is_recording, current_volume, audio_multiplier, gate, health: health_rx, _kill_tx: kill_tx })
     }
 
     pub fn get_volume(&self) -> u16 {
         self.current_volume.load(Ordering::Relaxed)
+    }
+
+    /// Se notifica cada vez que la captura cae o se restablece, para que la
+    /// interfaz pueda decirlo en lugar de fingir que todo anda.
+    pub fn health(&self) -> watch::Receiver<CaptureHealth> {
+        self.health.clone()
     }
 
     pub fn get_multiplier(&self) -> f32 {

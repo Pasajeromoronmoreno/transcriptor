@@ -178,6 +178,11 @@ async fn main() {
     );
     tracing::info!("ESC cancela el dictado en curso sin transcribir");
 
+    // Si la captura cae —un reinicio de PipeWire, por ejemplo— la aplicación
+    // seguiría viva y sorda: overlay respondiendo, atajos andando, y nada
+    // grabándose. El aviso lo hace visible mientras dura.
+    watch_capture_health(hot_mic.health(), overlay_hub.clone());
+
     // Pipeline robusto
     let context = PipelineContext::new(config.clone(), client, replacer);
 
@@ -282,7 +287,10 @@ fn reap_orphans() {
     // el overlay de este arranque salga al instante, dejándonos sin indicador.
     const ORPHANS: [(&str, &str, &str); 2] = [
         (
-            "^parec --format=s16le --rate=16000 --channels=1 --latency-msec=30$",
+            // El `--device` es opcional y va primero: sin contemplarlo, este
+            // patrón dejó de coincidir en cuanto se pudo elegir la fuente, y
+            // las capturas huérfanas dejaron de limpiarse en silencio.
+            "^parec( --device=[^ ]+)? --format=s16le --rate=16000 --channels=1 --latency-msec=30$",
             "TRN-CLEANUP-PAREC",
             "Se limpió una captura de audio huérfana",
         ),
@@ -302,6 +310,36 @@ fn reap_orphans() {
             }
         }
     }
+}
+
+fn watch_capture_health(
+    mut health: tokio::sync::watch::Receiver<audio::capture::CaptureHealth>,
+    overlay: overlay::OverlayHub,
+) {
+    use audio::capture::CaptureHealth;
+
+    tokio::spawn(async move {
+        while health.changed().await.is_ok() {
+            let state = *health.borrow_and_update();
+            match state {
+                CaptureHealth::Down => {
+                    // Persistente a propósito: mientras no haya micrófono, que
+                    // se vea. No es un error de un dictado, es la aplicación
+                    // incapaz de grabar.
+                    overlay.publish(
+                        overlay::AppPhase::Error,
+                        None,
+                        Some("Micrófono caído · reintentando".into()),
+                    );
+                    eprintln!("⚠️  Se perdió la captura de audio; reintentando…");
+                }
+                CaptureHealth::Running => {
+                    overlay.publish(overlay::AppPhase::Idle, None, None);
+                    eprintln!("✅ Captura de audio restablecida.");
+                }
+            }
+        }
+    });
 }
 
 fn start_volume_monitor(mic: Arc<audio::capture::HotMic>) {

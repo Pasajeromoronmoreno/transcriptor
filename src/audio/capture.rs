@@ -68,38 +68,31 @@ impl HotMic {
                         match result {
                             Ok(0) => break,
                             Ok(n) => {
+                                let raw = &temp_buf[..n];
                                 let mult = f32::from_bits(audio_multiplier_clone.load(Ordering::Relaxed));
-                                
-                                let processed_buf: Vec<u8> = if mult != 1.0 {
-                                    let mut buf = Vec::with_capacity(n);
-                                    for chunk in temp_buf[..n].chunks_exact(2) {
-                                        let sample = i16::from_le_bytes([chunk[0], chunk[1]]);
-                                        let new_sample = (sample as f32 * mult).clamp(-32768.0, 32767.0) as i16;
-                                        buf.extend_from_slice(&new_sample.to_le_bytes());
-                                    }
-                                    buf
-                                } else {
-                                    temp_buf[..n].to_vec()
-                                };
 
-                                // Cálculo de volumen Peak (0-32767)
-                                let peak = processed_buf.chunks_exact(2)
+                                // El monitor muestra la señal ya amplificada,
+                                // que es la que el usuario regula con los atajos
+                                // de ganancia.
+                                let peak = amplify(raw, mult).chunks_exact(2)
                                     .map(|c| i16::from_le_bytes([c[0], c[1]]).unsigned_abs())
                                     .max()
                                     .unwrap_or(0);
                                 current_volume_clone.store(peak, Ordering::Relaxed);
 
                                 if is_recording_clone.load(Ordering::SeqCst) {
-                                    // El volumen se mide antes de la puerta: el
-                                    // monitor tiene que mostrar lo que entra,
-                                    // que es lo que se usa para calibrarla.
+                                    // La puerta decide sobre la señal SIN amplificar.
+                                    // Si mirara la amplificada, los umbrales medidos
+                                    // dejarían de valer, y peor: cambiar la ganancia
+                                    // en caliente movería el umbral efectivo sin que
+                                    // nadie lo pida.
                                     let kept = match gate_clone.as_ref() {
-                                        Some(gate) => gate.lock().await.filter(&processed_buf),
-                                        None => processed_buf,
+                                        Some(gate) => gate.lock().await.filter(raw),
+                                        None => raw.to_vec(),
                                     };
                                     if !kept.is_empty() {
                                         let mut b = buffer_clone.lock().await;
-                                        b.extend_from_slice(&kept);
+                                        b.extend_from_slice(&amplify(&kept, mult));
                                     }
                                 }
                             }
@@ -143,11 +136,13 @@ impl HotMic {
         self.is_recording.store(false, Ordering::SeqCst);
 
         // La cola que no completó una ventana entra igual, para no cortar la
-        // última consonante.
+        // última consonante. Se amplifica acá porque la puerta trabaja sobre la
+        // señal cruda.
         if let Some(gate) = self.gate.as_ref() {
             let tail = gate.lock().await.flush();
             if !tail.is_empty() {
-                self.buffer.lock().await.extend_from_slice(&tail);
+                let amplified = amplify(&tail, self.get_multiplier());
+                self.buffer.lock().await.extend_from_slice(&amplified);
             }
         }
 
@@ -194,6 +189,20 @@ impl HotMic {
     }
 }
 
+/// Aplica la ganancia digital, saturando en vez de dar la vuelta.
+fn amplify(pcm: &[u8], multiplier: f32) -> Vec<u8> {
+    if multiplier == 1.0 {
+        return pcm.to_vec();
+    }
+    let mut out = Vec::with_capacity(pcm.len());
+    for pair in pcm.chunks_exact(2) {
+        let sample = i16::from_le_bytes([pair[0], pair[1]]);
+        let scaled = (sample as f32 * multiplier).clamp(-32768.0, 32767.0) as i16;
+        out.extend_from_slice(&scaled.to_le_bytes());
+    }
+    out
+}
+
 pub fn create_wav_header(pcm_data_len: u32) -> Vec<u8> {
     let mut header = Vec::with_capacity(44);
     header.extend_from_slice(b"RIFF");
@@ -210,4 +219,29 @@ pub fn create_wav_header(pcm_data_len: u32) -> Vec<u8> {
     header.extend_from_slice(b"data");
     header.extend_from_slice(&pcm_data_len.to_le_bytes());
     header
+}
+
+#[cfg(test)]
+mod tests {
+    use super::amplify;
+
+    #[test]
+    fn unity_gain_returns_the_input_untouched() {
+        let pcm = [0x10, 0x27, 0xf0, 0xd8];
+        assert_eq!(amplify(&pcm, 1.0), pcm);
+    }
+
+    #[test]
+    fn gain_scales_each_sample() {
+        let pcm = 1000i16.to_le_bytes();
+        assert_eq!(amplify(&pcm, 2.0), 2000i16.to_le_bytes());
+    }
+
+    #[test]
+    fn loud_input_saturates_instead_of_wrapping() {
+        // Sin la saturación, 30000 * 2 daría la vuelta a negativo y el dictado
+        // sonaría destrozado en vez de simplemente recortado.
+        assert_eq!(amplify(&30000i16.to_le_bytes(), 2.0), 32767i16.to_le_bytes());
+        assert_eq!(amplify(&(-30000i16).to_le_bytes(), 2.0), (-32768i16).to_le_bytes());
+    }
 }

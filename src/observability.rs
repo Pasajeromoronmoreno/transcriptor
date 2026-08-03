@@ -118,16 +118,16 @@ where
 }
 
 fn build_filter(level: &str) -> (EnvFilter, Option<String>) {
-    if let Ok(value) = env::var("RUST_LOG") {
-        if !value.trim().is_empty() {
-            match EnvFilter::try_new(value.clone()) {
-                Ok(filter) => return (filter, None),
-                Err(_) => {
-                    return (
-                        configured_filter(level),
-                        Some("RUST_LOG inválido; se usa logging.level".to_string()),
-                    );
-                }
+    if let Ok(value) = env::var("RUST_LOG")
+        && !value.trim().is_empty()
+    {
+        match EnvFilter::try_new(value.clone()) {
+            Ok(filter) => return (filter, None),
+            Err(_) => {
+                return (
+                    configured_filter(level),
+                    Some("RUST_LOG inválido; se usa logging.level".to_string()),
+                );
             }
         }
     }

@@ -1,14 +1,15 @@
 use evdev::{EventType, KeyCode};
+use std::sync::Arc;
 use std::thread;
 use tokio::sync::mpsc;
 use crate::input::KeyEvent;
 use crate::config::AppConfig;
 
-pub fn start_keyboard_listener(tx: mpsc::UnboundedSender<KeyEvent>, config: AppConfig) {
-    let devices = evdev::enumerate().into_iter().filter(|(_, dev)| {
+pub fn start_keyboard_listener(tx: mpsc::UnboundedSender<KeyEvent>, config: Arc<AppConfig>) {
+    let devices = evdev::enumerate().filter(|(_, dev)| {
         let name = dev.name().unwrap_or("");
         if name.contains("Transcriptor Virtual") { return false; }
-        dev.supported_keys().map_or(false, |keys| keys.contains(KeyCode::KEY_ENTER))
+        dev.supported_keys().is_some_and(|keys| keys.contains(KeyCode::KEY_ENTER))
     })
     .map(|(_, dev)| dev)
     .collect::<Vec<_>>();
@@ -30,10 +31,9 @@ pub fn start_keyboard_listener(tx: mpsc::UnboundedSender<KeyEvent>, config: AppC
         let tx = tx.clone();
         
         thread::spawn(move || {
-
             // Estado inicial del modificador (evitamos syscalls dentro del loop para ganar velocidad)
             let mut is_mod_down_local = dev.get_key_state()
-                .map_or(false, |k| k.contains(mod_key));
+                .is_ok_and(|k| k.contains(mod_key));
 
             loop {
                 let events: Vec<_> = match dev.fetch_events() {
@@ -55,13 +55,9 @@ pub fn start_keyboard_listener(tx: mpsc::UnboundedSender<KeyEvent>, config: AppC
 
                         if code == trigger {
                             if ev.value() == 0 { // UP
-
                                 let _ = tx.send(KeyEvent::Up);
-                            } 
+                            }
                             else if ev.value() == 1 { // DOWN
-                                if is_mod_down_local {
-
-                                }
                                 let _ = tx.send(KeyEvent::Down { modifier: is_mod_down_local });
                             }
                         }
@@ -86,11 +82,8 @@ pub fn start_keyboard_listener(tx: mpsc::UnboundedSender<KeyEvent>, config: AppC
                                 let _ = tx.send(KeyEvent::DecreaseGain);
                             }
                         }
-                        else if code == KeyCode::KEY_ESC {
-                            if ev.value() == 1 {
-
-                                let _ = tx.send(KeyEvent::ESC);
-                            }
+                        else if code == KeyCode::KEY_ESC && ev.value() == 1 {
+                            let _ = tx.send(KeyEvent::Escape);
                         }
                     }
                 }

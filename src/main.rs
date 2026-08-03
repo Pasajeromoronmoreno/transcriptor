@@ -10,7 +10,12 @@ mod transcription;
 
 use config::AppConfig;
 use input::{listener, state_machine};
-use std::io::{self, Write};
+use pipeline::replacer::Replacer;
+use pipeline::robust::PipelineContext;
+use std::fs::OpenOptions;
+use std::io::{self, IsTerminal, Write};
+use std::os::unix::io::AsRawFd;
+use std::path::PathBuf;
 use std::process::Command;
 use std::sync::Arc;
 use tokio::signal;
@@ -31,8 +36,8 @@ async fn main() {
         return;
     }
 
-    let _ = dotenvy::dotenv();
-    let config = AppConfig::load_from_file("config.toml");
+    let dotenv_path = config::load_dotenv();
+    let config = Arc::new(AppConfig::load_from_file("config.toml"));
     let observability = match observability::init(&config.logging) {
         Ok(observability) => observability,
         Err(error) => {
@@ -52,6 +57,9 @@ async fn main() {
     } else {
         tracing::warn!("No se encontró archivo de configuración; se usan valores por defecto");
     }
+    if let Some(path) = dotenv_path.as_deref() {
+        tracing::info!(dotenv_path = %path.display(), "Variables de entorno cargadas");
+    }
     for warning in &config.startup_warnings {
         tracing::warn!(code="TRN-CONFIG-PARSE", detail=%warning, "Diagnóstico de configuración");
     }
@@ -62,13 +70,19 @@ async fn main() {
     // happens to map to the terminal's QUIT character for the active layout.
     ignore_terminal_quit();
 
-    // Limpia instancias previas y procesos huérfanos para un inicio limpio.
-    cleanup_old_processes();
+    // Una sola instancia puede tener el micrófono y el teclado virtual.
+    let _instance_lock = match acquire_instance_lock() {
+        Ok(lock) => lock,
+        Err(error) => {
+            tracing::error!(code = "TRN-INSTANCE-LOCK", detail = %error, "No se puede arrancar una segunda instancia");
+            eprintln!("❌ {error}");
+            return;
+        }
+    };
+    reap_orphan_capture();
+
     let (overlay_hub, mut overlay_handle) = overlay::start().await;
     tracing::info!(version = env!("CARGO_PKG_VERSION"), "Transcriptor iniciado");
-
-    // Proactive cleanup: kill any other instances or parec orphans
-    // (This is a safety measure against zombies reported by user)
 
     // Inicializar teclado uinput
     if let Err(error) = output::typer::init() {
@@ -89,6 +103,29 @@ async fn main() {
                 handle.shutdown();
             }
             return;
+        }
+    };
+
+    // Un único cliente HTTP para todo el proceso: reconstruirlo por dictado
+    // tiraba el pool de conexiones de reqwest y pagaba DNS + TCP + TLS de nuevo.
+    let client = match api::groq::GroqClient::new(config.groq_connect_timeout, config.groq_request_timeout) {
+        Ok(client) => Arc::new(client),
+        Err(error) => {
+            tracing::error!(code=error.code(), error=%error, "No se pudo crear el cliente de transcripción");
+            if let Some(handle) = overlay_handle.take() {
+                handle.shutdown();
+            }
+            return;
+        }
+    };
+
+    // El diccionario se compila una vez. Si está mal formado se sigue sin
+    // reemplazos, que es mejor que fallar cada entrega.
+    let replacer = match Replacer::build(&config.dictionary) {
+        Ok(replacer) => Arc::new(replacer),
+        Err(error) => {
+            tracing::error!(code="TRN-DICTIONARY-BUILD", error=%error, "No se pudo compilar el diccionario; se entregará sin reemplazos");
+            Arc::new(None)
         }
     };
 
@@ -127,16 +164,16 @@ async fn main() {
         decrease = ?config.hotkey_decrease_gain,
         "Atajos de ganancia configurados"
     );
+    tracing::info!("ESC cancela el dictado en curso sin transcribir");
 
     // Pipeline robusto
-    let mic_clone = hot_mic.clone();
-    let cfg_final = config.clone();
+    let context = PipelineContext::new(config.clone(), client, replacer);
 
     tokio::select! {
         _ = signal::ctrl_c() => {
             tracing::info!("Señal de salida recibida; limpiando");
         }
-        _ = pipeline::robust::run(cmd_rx, mic_clone, cfg_final, overlay_hub) => {
+        _ = pipeline::robust::run(cmd_rx, hot_mic.clone(), context, overlay_hub) => {
             tracing::info!("Pipeline detenido");
         }
     }
@@ -170,40 +207,82 @@ fn overlay_socket_arg() -> Option<String> {
     None
 }
 
-fn cleanup_old_processes() {
-    let current_pid = std::process::id();
+/// Candado de instancia única. Mientras el proceso viva mantiene el archivo
+/// abierto; el kernel suelta el `flock` solo, incluso si la app muere de golpe,
+/// así que no quedan candados rancios que haya que limpiar a mano.
+struct InstanceLock {
+    _file: std::fs::File,
+}
 
-    // 1. Matar procesos parec huérfanos
-    if let Err(error) = Command::new("pkill")
-        .arg("-f")
-        .arg("parec --format=s16le")
-        .spawn() {
-        tracing::warn!(code="TRN-CLEANUP-PAREC", error=%error, "No se pudo ejecutar limpieza de parec");
+fn instance_lock_path() -> PathBuf {
+    std::env::var_os("XDG_RUNTIME_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir)
+        .join("transcriptor.lock")
+}
+
+/// Reemplaza la deduplicación por `pgrep`, que buscaba `target/debug` y por eso
+/// nunca encontró nada cuando el binario en uso era el de release.
+fn acquire_instance_lock() -> Result<InstanceLock, String> {
+    let path = instance_lock_path();
+    let file = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(&path)
+        .map_err(|error| format!("no se pudo abrir el candado {}: {error}", path.display()))?;
+
+    // SAFETY: `file` sigue vivo y su descriptor es válido durante la llamada.
+    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+        let holder = std::fs::read_to_string(&path)
+            .ok()
+            .map(|contents| contents.trim().to_string())
+            .filter(|contents| !contents.is_empty())
+            .unwrap_or_else(|| "desconocido".to_string());
+        return Err(format!(
+            "ya hay otra instancia de transcriptor corriendo (pid {holder}); cerrala antes de abrir otra"
+        ));
     }
 
-    // 2. Matar otras instancias de transcriptor (excepto nosotros mismos)
-    // Usamos pgrep para encontrar pids y los filtramos en el shell o aquí
-    match Command::new("pgrep")
-        .arg("-f")
-        .arg("target/debug/transcriptor")
-        .output() {
-      Ok(output) => {
-        let pids = String::from_utf8_lossy(&output.stdout);
-        for pid_str in pids.lines() {
-            if let Ok(pid) = pid_str.trim().parse::<u32>() {
-                if pid != current_pid {
-                    if let Err(error) = Command::new("kill").arg("-9").arg(pid.to_string()).spawn() {
-                        tracing::warn!(code="TRN-CLEANUP-PROCESS", pid, error=%error, "No se pudo limpiar una instancia anterior");
-                    }
-                }
-            }
+    // El pid es sólo diagnóstico: el candado real es el flock.
+    let _ = file.set_len(0);
+    let _ = (&file).write_all(format!("{}\n", std::process::id()).as_bytes());
+
+    tracing::debug!(lock_path = %path.display(), "Candado de instancia tomado");
+    Ok(InstanceLock { _file: file })
+}
+
+/// Mata capturas huérfanas propias. Sólo se llama con el candado ya tomado, o
+/// sea que no hay otra instancia viva y cualquier `parec` con nuestra firma
+/// exacta de argumentos quedó colgado de un arranque anterior.
+///
+/// La versión anterior mataba por `parec --format=s16le`, que también coincide
+/// con capturas de otras aplicaciones.
+fn reap_orphan_capture() {
+    const SIGNATURE: &str =
+        "^parec --format=s16le --rate=16000 --channels=1 --latency-msec=30$";
+
+    match Command::new("pkill").arg("-f").arg(SIGNATURE).status() {
+        Ok(status) if status.success() => {
+            tracing::info!(code = "TRN-CLEANUP-PAREC", "Se limpió una captura de audio huérfana");
         }
-      }
-      Err(error) => tracing::warn!(code="TRN-CLEANUP-PROCESS", error=%error, "No se pudo consultar instancias anteriores"),
+        Ok(_) => {}
+        Err(error) => {
+            tracing::warn!(code="TRN-CLEANUP-PAREC", error=%error, "No se pudo ejecutar la limpieza de capturas huérfanas");
+        }
     }
 }
 
 fn start_volume_monitor(mic: Arc<audio::capture::HotMic>) {
+    // El monitor repinta la primera línea de la terminal con secuencias ANSI.
+    // Sin TTY —redirigido a un archivo, o bajo un supervisor— sólo ensuciaría
+    // la salida y competiría con `tracing` por el mismo descriptor.
+    if !io::stdout().is_terminal() {
+        tracing::debug!("stdout no es una terminal; monitor de volumen desactivado");
+        return;
+    }
+
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_millis(100));
         loop {

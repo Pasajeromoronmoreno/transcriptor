@@ -14,6 +14,9 @@ pub enum Command {
     WaitForLatch,
     LatchRecording,
     StopRecording,
+    /// Aborta el dictado sin transcribir: descarta el audio y, si la llamada a
+    /// la API ya está en vuelo, la cancela.
+    CancelRecording,
     ToggleFormat,
     StopInvertedEnter,
     IncreaseGain,
@@ -24,7 +27,7 @@ pub enum Command {
 pub enum KeyEvent {
     Down { modifier: bool },
     Up,
-    ESC,
+    Escape,
     Alt { modifier: bool },
     EnterKey { modifier: bool },
     IncreaseGain,

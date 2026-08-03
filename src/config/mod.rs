@@ -2,7 +2,7 @@ use evdev::KeyCode;
 use serde::Deserialize;
 use std::env;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 #[derive(Deserialize, Debug)]
@@ -186,17 +186,48 @@ impl Default for AppConfig {
     }
 }
 
+/// Directorio de configuración del usuario: `$XDG_CONFIG_HOME/transcriptor`, o
+/// `~/.config/transcriptor` si la variable no está definida.
+pub fn xdg_config_dir() -> Option<PathBuf> {
+    env::var("XDG_CONFIG_HOME")
+        .ok()
+        .or_else(|| env::var("HOME").ok().map(|home| format!("{home}/.config")))
+        .map(|dir| PathBuf::from(dir).join("transcriptor"))
+}
+
+fn binary_dir() -> Option<PathBuf> {
+    env::current_exe()
+        .ok()
+        .and_then(|path| path.parent().map(Path::to_path_buf))
+}
+
+/// Carga el `.env` con el mismo criterio que `config.toml`: junto al binario,
+/// después en el directorio XDG y por último subiendo desde el directorio
+/// actual. Devuelve el archivo que se usó.
+///
+/// Sin la búsqueda en XDG, la key sólo aparecía si el proceso arrancaba dentro
+/// del repositorio, lo que ataba el ejecutable instalado a la copia del código.
+pub fn load_dotenv() -> Option<PathBuf> {
+    let candidates = [
+        binary_dir().map(|dir| dir.join(".env")),
+        xdg_config_dir().map(|dir| dir.join(".env")),
+    ];
+
+    for candidate in candidates.iter().flatten() {
+        if dotenvy::from_path(candidate).is_ok() {
+            return Some(candidate.clone());
+        }
+    }
+
+    dotenvy::dotenv().ok()
+}
+
 impl AppConfig {
     pub fn load_from_file(filename: &str) -> Self {
         let mut config = Self::default();
 
-        let binary_dir = env::current_exe()
-            .ok()
-            .and_then(|p| p.parent().map(|p| p.to_path_buf()));
-        let xdg_config = env::var("XDG_CONFIG_HOME")
-            .ok()
-            .or_else(|| env::var("HOME").ok().map(|h| format!("{}/.config", h)))
-            .map(|d| PathBuf::from(d).join("transcriptor"));
+        let binary_dir = binary_dir();
+        let xdg_config = xdg_config_dir();
         let cwd = env::current_dir().ok();
 
         let search_locations = [
@@ -207,29 +238,24 @@ impl AppConfig {
 
         let mut loaded_path: Option<PathBuf> = None;
 
-        for opt_path in &search_locations {
-            if let Some(path) = opt_path {
-                match fs::read_to_string(path) {
-                    Ok(contents) => {
-                        loaded_path = Some(path.clone());
-                        Self::parse_toml(&contents, &mut config);
-                        break;
-                    }
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                    Err(error) => config.startup_warnings.push(format!("No se pudo leer {}: {error}", path.display())),
+        for opt_path in search_locations.iter().flatten() {
+            match fs::read_to_string(opt_path) {
+                Ok(contents) => {
+                    loaded_path = Some(opt_path.clone());
+                    Self::parse_toml(&contents, &mut config);
+                    break;
                 }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => config.startup_warnings.push(format!("No se pudo leer {}: {error}", opt_path.display())),
             }
-        }
-
-        if loaded_path.is_none() {
         }
 
         config.config_path = loaded_path;
 
-        if let Ok(api_key) = env::var("GROQ_API_KEY") {
-            if !api_key.trim().is_empty() {
-                config.groq_api_key = api_key;
-            }
+        if let Ok(api_key) = env::var("GROQ_API_KEY")
+            && !api_key.trim().is_empty()
+        {
+            config.groq_api_key = api_key;
         }
 
         config

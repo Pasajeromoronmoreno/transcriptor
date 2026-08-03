@@ -112,42 +112,37 @@ pub struct OverlayHandle {
 }
 
 impl OverlayHandle {
+    #[cfg(not(feature = "overlay"))]
     pub fn shutdown(self) {
-        #[cfg(not(feature = "overlay"))]
-        {
-            let _ = self;
-            return;
-        }
+        let _ = self;
+    }
 
-        #[cfg(feature = "overlay")]
-        {
+    #[cfg(feature = "overlay")]
+    pub fn shutdown(self) {
         self.server_task.abort();
         if let Some(mut child) = self.child {
             let _ = child.kill();
             let _ = child.wait();
         }
         let _ = std::fs::remove_file(&self.socket_path);
-        }
     }
 }
 
+#[cfg(not(feature = "overlay"))]
+pub async fn start() -> (OverlayHub, Option<OverlayHandle>) {
+    eprintln!("ℹ️ Overlay desactivado: compilá con `--features overlay` para habilitarlo.");
+    (OverlayHub::new(), None)
+}
+
+#[cfg(feature = "overlay")]
 pub async fn start() -> (OverlayHub, Option<OverlayHandle>) {
     let hub = OverlayHub::new();
 
-    #[cfg(not(feature = "overlay"))]
-    {
-        eprintln!("ℹ️ Overlay desactivado: compilá con `--features overlay` para habilitarlo.");
-        return (hub, None);
-    }
-
-    #[cfg(feature = "overlay")]
-    {
-        match start_enabled(hub.clone()).await {
-            Ok(handle) => (hub, Some(handle)),
-            Err(error) => {
-                tracing::warn!(code="TRN-OVERLAY-START", error=%error, "No se pudo iniciar el overlay");
-                (hub, None)
-            }
+    match start_enabled(hub.clone()).await {
+        Ok(handle) => (hub, Some(handle)),
+        Err(error) => {
+            tracing::warn!(code="TRN-OVERLAY-START", error=%error, "No se pudo iniciar el overlay");
+            (hub, None)
         }
     }
 }
@@ -242,11 +237,13 @@ mod ui {
             let Ok(stream) = UnixStream::connect(socket_path) else {
                 return;
             };
-            for line in BufReader::new(stream).lines().flatten() {
-                if let Ok(status) = serde_json::from_str::<OverlayStatus>(&line) {
-                    if status_tx.send(status).is_err() {
-                        break;
-                    }
+            // Se corta ante el primer error de lectura: `flatten()` los saltea
+            // y giraría para siempre si el socket queda en estado de error.
+            for line in BufReader::new(stream).lines().map_while(Result::ok) {
+                if let Ok(status) = serde_json::from_str::<OverlayStatus>(&line)
+                    && status_tx.send(status).is_err()
+                {
+                    break;
                 }
             }
         });

@@ -1,32 +1,59 @@
 use std::sync::Arc;
-use tokio::sync::{mpsc, oneshot};
-use aho_corasick::{AhoCorasick, MatchKind};
+use tokio::sync::{mpsc, oneshot, Mutex};
+use tokio::task::JoinHandle;
 use crate::audio::capture::HotMic;
 use crate::config::AppConfig;
 use crate::input::Command;
 use crate::overlay::{AppPhase, OverlayHub, RecordingMode};
 use crate::{api, output, transcription};
 use crate::pipeline::profile::PipelineProfiler;
+use crate::pipeline::replacer::Replacer;
 use thiserror::Error;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 const MAX_PCM_BYTES: usize = 24 * 1024 * 1024;
 static SESSION_COUNTER: AtomicU64 = AtomicU64::new(1);
 
+/// Dependencias compartidas por todas las sesiones. Se arman una vez en `main`
+/// y se clonan por referencia: el cliente HTTP conserva su pool de conexiones
+/// entre dictados y el diccionario ya viene compilado.
+#[derive(Clone)]
+pub struct PipelineContext {
+    pub config: Arc<AppConfig>,
+    pub client: Arc<api::groq::GroqClient>,
+    pub replacer: Arc<Option<Replacer>>,
+    /// Serializa la entrega: dos transcripciones que terminan a la vez no deben
+    /// pisarse el portapapeles ni intercalar pulsaciones de teclado.
+    delivery: Arc<Mutex<()>>,
+}
+
+impl PipelineContext {
+    pub fn new(
+        config: Arc<AppConfig>,
+        client: Arc<api::groq::GroqClient>,
+        replacer: Arc<Option<Replacer>>,
+    ) -> Self {
+        Self { config, client, replacer, delivery: Arc::new(Mutex::new(())) }
+    }
+}
+
 /// Pipeline simplificado: Todo va al portapapeles y se pega atómicamente.
 pub async fn run(
     mut cmd_rx: mpsc::UnboundedReceiver<Command>,
     hot_mic: Arc<HotMic>,
-    config: AppConfig,
+    context: PipelineContext,
     overlay: OverlayHub,
 ) {
+    let config = context.config.clone();
     let mut split_cancel: Option<oneshot::Sender<()>> = None;
-    
+
     // Estados de sesión que pueden cambiar durante la grabación
     let mut session_add_period = config.add_period;
-    let mut session_auto_enter: Option<bool> = None; // None = usa config global, Some = fuerza un valor
     let mut session_mode: Option<RecordingMode> = None;
     let mut session_id = 0u64;
+    // Transcripción en vuelo. Se guarda para que ESC pueda abortarla sin
+    // esperar a que termine la llamada a la API.
+    let mut in_flight: Option<JoinHandle<()>> = None;
 
     while let Some(command) = cmd_rx.recv().await {
         match command {
@@ -36,24 +63,23 @@ pub async fn run(
             Command::StartRecording(mode) => {
                 session_id = ((std::process::id() as u64) << 32) | SESSION_COUNTER.fetch_add(1, Ordering::Relaxed);
                 session_add_period = config.add_period;
-                session_auto_enter = None;
                 session_mode = Some(mode.into());
 
                 if let Some(tx) = split_cancel.take() { let _ = tx.send(()); }
                 hot_mic.start_recording().await;
                 overlay.publish(AppPhase::Recording, session_mode, None);
                 tracing::info!(session_id, mode=?session_mode, "Grabación iniciada");
-                println!("🎤 Grabando... [Punto Final: {}]", 
+                println!("🎤 Grabando... [Punto Final: {}]",
                     if session_add_period { "SI" } else { "NO" }
                 );
 
                 let mic = hot_mic.clone();
-                let cfg = config.clone();
+                let ctx = context.clone();
                 let (cancel_tx, cancel_rx) = oneshot::channel();
                 split_cancel = Some(cancel_tx);
 
                 tokio::spawn(async move {
-                    auto_split_monitor(mic, cfg, cancel_rx).await;
+                    auto_split_monitor(mic, ctx, cancel_rx).await;
                 });
             }
             Command::WaitForLatch => {
@@ -69,13 +95,39 @@ pub async fn run(
             }
             Command::StopInvertedEnter => {
                 if let Some(tx) = split_cancel.take() { let _ = tx.send(()); }
-                session_auto_enter = Some(!config.auto_enter);
-                finish_recording(session_id, &hot_mic, &config, &overlay, session_mode, session_add_period, !config.auto_enter).await;
+                in_flight = spawn_finish(
+                    &context, &overlay, &hot_mic, session_id, session_mode,
+                    session_add_period, !config.auto_enter,
+                ).await;
             }
             Command::StopRecording => {
                 if let Some(tx) = split_cancel.take() { let _ = tx.send(()); }
-                let final_enter = session_auto_enter.unwrap_or(config.auto_enter);
-                finish_recording(session_id, &hot_mic, &config, &overlay, session_mode, session_add_period, final_enter).await;
+                in_flight = spawn_finish(
+                    &context, &overlay, &hot_mic, session_id, session_mode,
+                    session_add_period, config.auto_enter,
+                ).await;
+            }
+            Command::CancelRecording => {
+                if let Some(tx) = split_cancel.take() { let _ = tx.send(()); }
+                let discarded_bytes = hot_mic.discard_recording().await;
+                let aborted = match in_flight.take() {
+                    Some(handle) if !handle.is_finished() => { handle.abort(); true }
+                    _ => false,
+                };
+
+                // ESC en reposo no debe hacer ruido: sólo se reporta cuando
+                // había realmente algo que cancelar.
+                if discarded_bytes.is_some() || aborted {
+                    tracing::info!(
+                        session_id,
+                        discarded_bytes = discarded_bytes.unwrap_or(0),
+                        aborted_transcription = aborted,
+                        "Dictado cancelado por el usuario"
+                    );
+                    println!("🚫 Cancelado.");
+                    session_mode = None;
+                    overlay.publish(AppPhase::Idle, None, None);
+                }
             }
             Command::IncreaseGain => {
                 let mut new_gain = hot_mic.get_multiplier() + 0.5;
@@ -97,18 +149,65 @@ pub async fn run(
     }
 }
 
-#[tracing::instrument(skip_all, fields(session_id = session_id, mode=?session_mode))]
-async fn finish_recording(session_id: u64, hot_mic: &HotMic, config: &AppConfig, overlay: &OverlayHub, session_mode: Option<RecordingMode>, add_period: bool, auto_enter: bool) {
-    let mut profiler = PipelineProfiler::new(config.profile_latency);
+/// Un dictado ya cerrado, con el audio en mano y listo para transcribir.
+struct FinishedSession {
+    id: u64,
+    mode: Option<RecordingMode>,
+    add_period: bool,
+    auto_enter: bool,
+    wav: Vec<u8>,
+    profiler: PipelineProfiler,
+}
+
+/// Cierra la grabación y delega la transcripción a una tarea aparte.
+///
+/// Drenar el búfer es instantáneo; la llamada a la API no. Antes se hacía
+/// `.await` acá adentro y el loop de comandos quedaba sordo hasta un minuto
+/// (timeout por reintentos), sin poder encadenar dictados ni ajustar ganancia.
+async fn spawn_finish(
+    context: &PipelineContext,
+    overlay: &OverlayHub,
+    hot_mic: &Arc<HotMic>,
+    session_id: u64,
+    session_mode: Option<RecordingMode>,
+    add_period: bool,
+    auto_enter: bool,
+) -> Option<JoinHandle<()>> {
+    let mut profiler = PipelineProfiler::new(context.config.profile_latency);
     profiler.start();
     let wav = hot_mic.stop_recording().await;
     profiler.stamp("Frenar Grabación (Obtención de Audio)");
+
     if wav.len() <= 8044 {
         tracing::warn!(code="TRN-AUDIO-EMPTY", wav_bytes=wav.len(), "La captura no contiene audio suficiente");
         overlay.publish(AppPhase::Error, None, Some("Sin audio · TRN-AUDIO-EMPTY".into()));
         profiler.finish();
-        return;
+        return None;
     }
+
+    let session = FinishedSession {
+        id: session_id,
+        mode: session_mode,
+        add_period,
+        auto_enter,
+        wav,
+        profiler,
+    };
+    let context = context.clone();
+    let overlay = overlay.clone();
+    Some(tokio::spawn(async move {
+        finish_recording(&context, &overlay, session).await;
+    }))
+}
+
+#[tracing::instrument(skip_all, fields(session_id = session.id, mode = ?session.mode))]
+async fn finish_recording(
+    context: &PipelineContext,
+    overlay: &OverlayHub,
+    session: FinishedSession,
+) {
+    let FinishedSession { mode: session_mode, add_period, auto_enter, wav, mut profiler, .. } = session;
+    let config = &context.config;
     overlay.publish(AppPhase::Transcribing, session_mode, None);
     tracing::info!(wav_bytes=wav.len(), mode=?session_mode, "Iniciando transcripción");
     if config.export_audio {
@@ -119,22 +218,15 @@ async fn finish_recording(session_id: u64, hot_mic: &HotMic, config: &AppConfig,
     let prompt = config.experimental_live.then_some(config.whisper_prompt.as_str());
     profiler.stamp("Inferencia API Groq (Iniciar Petición)");
     let retry_overlay = overlay.clone();
-    let client = match api::groq::GroqClient::new(config.groq_connect_timeout, config.groq_request_timeout) {
-        Ok(client) => client,
-        Err(error) => {
-            tracing::error!(code=error.code(), error=%error, "No se pudo crear el cliente de transcripción");
-            overlay.publish(AppPhase::Error, None, Some(format!("Error de transcripción · {}", error.code())));
-            return;
-        }
-    };
-    match transcription::transcribe(&client, &config.retry, &config.groq_api_key, &wav, &config.groq_language, prompt, move |attempt, max, _, error| {
+    match transcription::transcribe(&context.client, &config.retry, &config.groq_api_key, &wav, &config.groq_language, prompt, move |attempt, max, _, error| {
         let reason = if error.code() == "TRN-GROQ-RATE" { "Groq ocupado" } else { "Problema de red" };
         retry_overlay.publish(AppPhase::Retrying, session_mode, Some(format!("{reason} · reintentando {attempt}/{max}…")));
     }).await {
         Ok(text) => {
             profiler.stamp("API Groq (Respuesta Recibida)");
             overlay.publish(AppPhase::Delivering, session_mode, None);
-            match deliver_text(&text, config, add_period, auto_enter, &mut profiler).await {
+            let _delivery = context.delivery.lock().await;
+            match deliver_text(&text, context, add_period, auto_enter, &mut profiler).await {
                 Ok(()) => overlay.publish(AppPhase::Idle, None, None),
                 Err(error) => {
                     tracing::error!(code=error.code(), error=%error, "Fallo entregando transcripción");
@@ -155,34 +247,19 @@ async fn finish_recording(session_id: u64, hot_mic: &HotMic, config: &AppConfig,
 enum DeliveryError {
     #[error("clipboard: {0}")] Clipboard(String),
     #[error("uinput: {0}")] Uinput(String),
-    #[error("diccionario: {0}")] Dictionary(String),
 }
-impl DeliveryError { fn code(&self) -> &'static str { match self { Self::Clipboard(_) => "TRN-OUTPUT-CLIPBOARD", Self::Uinput(_) => "TRN-OUTPUT-UINPUT", Self::Dictionary(_) => "TRN-DICTIONARY-BUILD" } } }
+impl DeliveryError { fn code(&self) -> &'static str { match self { Self::Clipboard(_) => "TRN-OUTPUT-CLIPBOARD", Self::Uinput(_) => "TRN-OUTPUT-UINPUT" } } }
 
-async fn deliver_text(text: &str, config: &AppConfig, add_period: bool, auto_enter: bool, profiler: &mut PipelineProfiler) -> Result<(), DeliveryError> {
+async fn deliver_text(text: &str, context: &PipelineContext, add_period: bool, auto_enter: bool, profiler: &mut PipelineProfiler) -> Result<(), DeliveryError> {
+    let config = &context.config;
     let mut final_text = text.trim().to_string();
 
-    // 0. Diccionario de reemplazos (case-insensitive) — single-pass con Aho-Corasick
+    // 0. Diccionario de reemplazos (case-insensitive), ya compilado al arrancar
     profiler.stamp("Diccionario (Inicio)");
-    if config.dictionary_enabled && !config.dictionary.is_empty() {
-        let patterns: Vec<String> = config.dictionary.iter()
-            .map(|(k, _)| k.to_lowercase())
-            .collect();
-        let ac = AhoCorasick::builder()
-            .match_kind(MatchKind::LeftmostLongest)
-            .build(&patterns)
-            .map_err(|error| DeliveryError::Dictionary(error.to_string()))?;
-
-        let lower_input = final_text.to_lowercase();
-        let mut result = String::with_capacity(final_text.len());
-        let mut last_end = 0;
-        for m in ac.find_iter(&lower_input) {
-            result.push_str(&final_text[last_end..m.start()]);
-            result.push_str(&config.dictionary[m.pattern().as_usize()].1);
-            last_end = m.end();
-        }
-        result.push_str(&final_text[last_end..]);
-        final_text = result;
+    if config.dictionary_enabled
+        && let Some(replacer) = context.replacer.as_ref()
+    {
+        final_text = replacer.apply(&final_text);
     }
     profiler.stamp("Diccionario (Fin / Reemplazo completado)");
 
@@ -191,10 +268,8 @@ async fn deliver_text(text: &str, config: &AppConfig, add_period: bool, auto_ent
         if !final_text.ends_with('.') && !final_text.ends_with('?') && !final_text.ends_with('!') {
             final_text.push('.');
         }
-    } else {
-        if final_text.ends_with('.') {
-            final_text.pop();
-        }
+    } else if final_text.ends_with('.') {
+        final_text.pop();
     }
 
     // 2. Lógica de Espacio Final (Hardcodeada)
@@ -215,12 +290,12 @@ async fn deliver_text(text: &str, config: &AppConfig, add_period: bool, auto_ent
         tokio::time::sleep(std::time::Duration::from_millis(30)).await;
         output::typer::paste_from_clipboard().map_err(DeliveryError::Uinput)?;
         profiler.stamp("Simular pegar desde portapapeles (Shift+Insert)");
-        
+
         if auto_enter {
             // ⚠️ ATENCIÓN MANTENEDORES: NO REMOVER ESTE SLEEP.
-            // Esto previene una condición de carrera (Race Condition) documentada: 
-            // Si mandamos un "Enter" virtual inmediatamente después del "Shift+Insert", 
-            // la aplicación GUI o terminal no tiene tiempo suficiente para redibujarse 
+            // Esto previene una condición de carrera (Race Condition) documentada:
+            // Si mandamos un "Enter" virtual inmediatamente después del "Shift+Insert",
+            // la aplicación GUI o terminal no tiene tiempo suficiente para redibujarse
             // tras leer el portapapeles. El síntoma clásico es presionar Enter mandando
             // un mensaje en blanco y pintar la transcripción *después*.
             // Ver `auto_enter_delay_ms` en `config.toml`. Valor testeado empíricamente: ~30-50ms.
@@ -234,7 +309,8 @@ async fn deliver_text(text: &str, config: &AppConfig, add_period: bool, auto_ent
     Ok(())
 }
 
-async fn auto_split_monitor(mic: Arc<HotMic>, config: AppConfig, mut cancel: oneshot::Receiver<()>) {
+async fn auto_split_monitor(mic: Arc<HotMic>, context: PipelineContext, mut cancel: oneshot::Receiver<()>) {
+    let config = context.config.clone();
     let mut interval = tokio::time::interval(std::time::Duration::from_secs(2));
     loop {
         tokio::select! {
@@ -244,15 +320,12 @@ async fn auto_split_monitor(mic: Arc<HotMic>, config: AppConfig, mut cancel: one
                     let wav = mic.flush_and_continue().await;
                     let p = if config.experimental_live { Some(config.whisper_prompt.as_str()) } else { None };
                     if config.experimental_live { println!("🧪 [Experimental Live] Aplicando prompt en auto-split..."); }
-                    let client = match api::groq::GroqClient::new(config.groq_connect_timeout, config.groq_request_timeout) {
-                        Ok(client) => client,
-                        Err(error) => { tracing::error!(code=error.code(), error=%error, "No se pudo crear cliente Groq en auto-split"); continue; }
-                    };
-                    match transcription::transcribe(&client, &config.retry, &config.groq_api_key, &wav, &config.groq_language, p, |_, _, _, _| {}).await {
+                    match transcription::transcribe(&context.client, &config.retry, &config.groq_api_key, &wav, &config.groq_language, p, |_, _, _, _| {}).await {
                       Ok(text) => {
                         // En auto-split usamos la configuración base con profiler inactivo
                         let mut dummy_profiler = PipelineProfiler::new(false);
-                        if let Err(error) = deliver_text(&text, &config, config.add_period, config.auto_enter, &mut dummy_profiler).await {
+                        let _delivery = context.delivery.lock().await;
+                        if let Err(error) = deliver_text(&text, &context, config.add_period, config.auto_enter, &mut dummy_profiler).await {
                             tracing::error!(code=error.code(), error=%error, "Fallo de salida en auto-split");
                         }
                       }

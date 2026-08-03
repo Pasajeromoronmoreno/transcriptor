@@ -124,6 +124,20 @@ impl HotMic {
     }
 
 
+    /// Corta la grabación tirando el audio: no se arma WAV ni se llama a la API.
+    ///
+    /// Devuelve los bytes descartados, o `None` si no había grabación activa,
+    /// para que quien cancela sepa si había algo que cancelar.
+    pub async fn discard_recording(&self) -> Option<usize> {
+        if !self.is_recording.swap(false, Ordering::SeqCst) {
+            return None;
+        }
+        let mut b = self.buffer.lock().await;
+        let discarded = b.len();
+        b.clear();
+        Some(discarded)
+    }
+
     pub async fn buffer_len(&self) -> usize {
         self.buffer.lock().await.len()
     }

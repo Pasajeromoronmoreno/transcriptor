@@ -79,6 +79,12 @@ pub async fn run_state_machine(
                         let _ = cmd_tx.send(Command::LatchRecording);
                         state = InternalState::RecordingTap { started_at: now };
                     }
+                    // Un Up suelto acá no significa nada: seguimos esperando o
+                    // el Down que ancla, o que venza el plazo, que es quien
+                    // manda StopRecording. Caer al brazo genérico de abajo
+                    // volvía a Idle sin cortar, dejando el micrófono grabando
+                    // hasta el próximo dictado.
+                    (InternalState::WaitingForLatch { .. }, KeyEvent::Up) => {}
 
                     // --- MODO TAP (Anclado) ---
                     (InternalState::RecordingTap { started_at, .. }, event) => {
@@ -111,9 +117,10 @@ pub async fn run_state_machine(
                     (_, KeyEvent::DecreaseGain) => {
                         let _ = cmd_tx.send(Command::DecreaseGain);
                     }
-                    // Acá sólo llegan Idle y WaitingForLatch: RecordingPush y
-                    // RecordingTap consumen su propio Up en los brazos de
-                    // arriba, así que la guarda que había era siempre cierta.
+                    // Red de seguridad: cada estado que graba consume su propio
+                    // Up más arriba, así que acá sólo llega Idle. Se conserva
+                    // para que un estado nuevo no herede el bug de quedarse
+                    // grabando en silencio.
                     (_, KeyEvent::Up) => {
                         state = InternalState::Idle;
                     }
@@ -175,8 +182,15 @@ mod tests {
 
         /// El reloj está pausado, así que un `recv` sin nada pendiente avanza el
         /// tiempo hasta el próximo temporizador en vez de colgarse.
+        ///
+        /// El timeout es la red contra regresiones que dejan a la máquina sin
+        /// ningún temporizador vivo: sin él, el test se cuelga hasta que lo mata
+        /// la CI en vez de fallar con un mensaje útil.
         async fn next(&mut self) -> Command {
-            self.commands.recv().await.expect("se esperaba un comando")
+            tokio::time::timeout(Duration::from_secs(5), self.commands.recv())
+                .await
+                .expect("la máquina de estados no emitió ningún comando")
+                .expect("el canal de comandos sigue abierto")
         }
 
         /// Arranca en modo Tap: pulsación corta del trigger con modificador.
@@ -227,6 +241,36 @@ mod tests {
         assert_eq!(harness.next().await, Command::WaitForLatch);
         harness.press(KeyEvent::Down { modifier: false });
         assert_eq!(harness.next().await, Command::LatchRecording);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_stray_release_inside_the_latch_window_is_ignored() {
+        let mut harness = Harness::start();
+        harness.start_push().await;
+
+        harness.press(KeyEvent::Up);
+        assert_eq!(harness.next().await, Command::WaitForLatch);
+
+        // Un segundo Up no debe abandonar la ventana de latch. Si lo hiciera se
+        // volvería a Idle sin mandar StopRecording y el micrófono quedaría
+        // grabando hasta el próximo dictado. El Down que sigue lo delata: ancla
+        // la grabación en vez de rearmar desde cero.
+        harness.press(KeyEvent::Up);
+        harness.press(KeyEvent::Down { modifier: true });
+        assert_eq!(harness.next().await, Command::LatchRecording);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_stray_release_still_lets_the_latch_window_expire() {
+        let mut harness = Harness::start();
+        harness.start_push().await;
+
+        harness.press(KeyEvent::Up);
+        assert_eq!(harness.next().await, Command::WaitForLatch);
+        harness.press(KeyEvent::Up);
+
+        // Y si nadie ancla, el plazo sigue venciendo y cortando como siempre.
+        assert_eq!(harness.next().await, Command::StopRecording);
     }
 
     #[tokio::test(start_paused = true)]

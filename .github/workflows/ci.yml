@@ -1,0 +1,45 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    name: Build, tests y clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      # El build por defecto incluye la feature `overlay`, que enlaza contra
+      # GTK4 y GTK4 Layer Shell. `libudev-dev` lo necesita `uinput-sys`.
+      - name: Instalar dependencias del sistema
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config \
+            libgtk-4-dev \
+            libgtk4-layer-shell-dev \
+            libudev-dev
+
+      - name: Build
+        run: cargo build --locked --all-targets
+
+      - name: Tests
+        run: cargo test --locked
+
+      # Sin `-D warnings` por ahora: el código actual arrastra avisos previos y
+      # no queremos que el primer PR arranque en rojo. Cuando esté limpio,
+      # agregar `-- -D warnings` para que los avisos bloqueen el merge.
+      - name: Clippy
+        run: cargo clippy --locked --all-targets

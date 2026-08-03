@@ -86,8 +86,15 @@ gh pr merge --squash --delete-branch
 ```
 
 La CI (`.github/workflows/ci.yml`) corre build, tests y clippy en cada PR.
-Clippy todavía no bloquea: el código arrastra avisos previos. Cuando estén
-saldados, agregar `-- -D warnings` al paso de clippy.
+
+Dos límites conocidos:
+
+- **Compila con `--no-default-features`.** GTK4 Layer Shell no está empaquetado
+  en Ubuntu 24.04, que es la imagen del runner. Queda cubierto config,
+  pipeline, transcripción y observabilidad, que es donde está la lógica y
+  todos los tests. El overlay se verifica localmente con `cargo build`.
+- **Clippy todavía no bloquea**: el código arrastra avisos previos. Cuando
+  estén saldados, agregar `-- -D warnings` al paso de clippy.
 
 ## Volver atrás
 

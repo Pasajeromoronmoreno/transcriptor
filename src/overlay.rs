@@ -296,11 +296,27 @@ mod ui {
         window.set_exclusive_zone(0);
         window.set_visible(false);
 
+        let app = app.clone();
         glib::timeout_add_local(Duration::from_millis(80), move || {
-            while let Ok(status) = status_rx.borrow().try_recv() {
-                apply_status(&window, &label, &status);
+            loop {
+                // El préstamo se suelta antes de tocar la ventana.
+                let received = status_rx.borrow().try_recv();
+                match received {
+                    Ok(status) => apply_status(&window, &label, &status),
+                    Err(mpsc::TryRecvError::Empty) => return glib::ControlFlow::Continue,
+                    // El proceso principal cerró el socket: murió, o lo mataron
+                    // sin pasar por su apagado ordenado. Sin él no hay estados
+                    // que mostrar, y quedarse vivo es peor que inútil: GTK usa
+                    // D-Bus para instancia única, así que este proceso retiene
+                    // `local.transcriptor.Overlay` y el overlay del próximo
+                    // arranque sale de inmediato creyendo que ya hay uno vivo.
+                    Err(mpsc::TryRecvError::Disconnected) => {
+                        window.close();
+                        app.quit();
+                        return glib::ControlFlow::Break;
+                    }
+                }
             }
-            glib::ControlFlow::Continue
         });
     }
 

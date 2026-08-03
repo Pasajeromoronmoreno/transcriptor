@@ -79,7 +79,7 @@ async fn main() {
             return;
         }
     };
-    reap_orphan_capture();
+    reap_orphans();
 
     let (overlay_hub, mut overlay_handle) = overlay::start().await;
     tracing::info!(version = env!("CARGO_PKG_VERSION"), "Transcriptor iniciado");
@@ -253,23 +253,41 @@ fn acquire_instance_lock() -> Result<InstanceLock, String> {
     Ok(InstanceLock { _file: file })
 }
 
-/// Mata capturas huérfanas propias. Sólo se llama con el candado ya tomado, o
-/// sea que no hay otra instancia viva y cualquier `parec` con nuestra firma
-/// exacta de argumentos quedó colgado de un arranque anterior.
+/// Mata procesos hijos huérfanos propios. Sólo se llama con el candado ya
+/// tomado, o sea que no hay otra instancia viva y todo lo que coincida con
+/// nuestras firmas exactas quedó colgado de un arranque anterior.
+///
+/// Ambos hijos se lanzan en su propio grupo de procesos para que las señales de
+/// la terminal no los alcance, así que sobreviven si el proceso principal muere
+/// sin pasar por su apagado ordenado —cerrar la ventana en vez de Ctrl+C, por
+/// ejemplo—.
 ///
 /// La versión anterior mataba por `parec --format=s16le`, que también coincide
-/// con capturas de otras aplicaciones.
-fn reap_orphan_capture() {
-    const SIGNATURE: &str =
-        "^parec --format=s16le --rate=16000 --channels=1 --latency-msec=30$";
+/// con capturas de otras aplicaciones, y no contemplaba el overlay.
+fn reap_orphans() {
+    // Un overlay huérfano no es sólo un proceso de más: GTK usa D-Bus para
+    // instancia única, así que retiene `local.transcriptor.Overlay` y hace que
+    // el overlay de este arranque salga al instante, dejándonos sin indicador.
+    const ORPHANS: [(&str, &str, &str); 2] = [
+        (
+            "^parec --format=s16le --rate=16000 --channels=1 --latency-msec=30$",
+            "TRN-CLEANUP-PAREC",
+            "Se limpió una captura de audio huérfana",
+        ),
+        (
+            "^[^ ]*transcriptor --overlay ",
+            "TRN-CLEANUP-OVERLAY",
+            "Se limpió un overlay huérfano que retenía el nombre de GApplication",
+        ),
+    ];
 
-    match Command::new("pkill").arg("-f").arg(SIGNATURE).status() {
-        Ok(status) if status.success() => {
-            tracing::info!(code = "TRN-CLEANUP-PAREC", "Se limpió una captura de audio huérfana");
-        }
-        Ok(_) => {}
-        Err(error) => {
-            tracing::warn!(code="TRN-CLEANUP-PAREC", error=%error, "No se pudo ejecutar la limpieza de capturas huérfanas");
+    for (signature, code, message) in ORPHANS {
+        match Command::new("pkill").arg("-f").arg(signature).status() {
+            Ok(status) if status.success() => tracing::info!(code, "{}", message),
+            Ok(_) => {}
+            Err(error) => {
+                tracing::warn!(code, error=%error, "No se pudo ejecutar la limpieza de procesos huérfanos");
+            }
         }
     }
 }

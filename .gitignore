@@ -11,3 +11,4 @@
 /latency_dashboard.html
 /ideas/
 *.log
+/config.toml.obsoleto-*

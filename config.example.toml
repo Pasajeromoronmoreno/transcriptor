@@ -20,9 +20,19 @@ audio_multiplier = 14.0
 #
 # Viene apagada porque los umbrales dependen del micrófono y del ambiente; un
 # valor genérico cortaría la voz en unos equipos y no filtraría nada en otros.
-# Para calibrarla hacen falta dos mediciones, una de fondo y otra hablando:
-#     parec --device=<fuente> --format=s16le --rate=16000 --channels=1 > /tmp/m.pcm
-# El umbral de apertura va entre ambos niveles; el de cierre, unos dB por debajo.
+#
+# Para calibrarla, medir el RMS en dBFS del fondo y de la voz por separado. El
+# umbral de apertura va entre ambos; el de cierre, unos dB por debajo del de
+# apertura pero POR ENCIMA del nivel del fondo.
+#
+# Ese último punto es el que se pasa por alto: si el cierre queda pegado al
+# nivel del fondo, la puerta abre una vez y ya no vuelve a cerrar, y parece que
+# no filtrara nada. Conviene dejarle 3 o 4 dB de aire.
+#
+# Si deja pasar ruido de fondo -> subir ambos umbrales.
+# Si corta sílabas o se come palabras -> bajar el de apertura.
+#
+# Los cambios se leen al arrancar: hay que reiniciar la aplicación.
 [gate]
 enabled = false
 # Nivel a partir del cual se empieza a grabar, en dBFS.

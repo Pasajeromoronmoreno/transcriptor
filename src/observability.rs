@@ -15,6 +15,78 @@ use tracing_subscriber::{EnvFilter, fmt};
 const LOG_FILE_PREFIX: &str = "transcriptor.log";
 const SECONDS_PER_DAY: u64 = 24 * 60 * 60;
 
+/// Fecha local en formato `YYYY-MM-DD`.
+///
+/// `localtime_r` es la vía segura en procesos con hilos, a diferencia de
+/// `localtime`, que devuelve un puntero a un `tm` estático compartido.
+fn local_date(seconds_since_epoch: i64) -> String {
+    let time = seconds_since_epoch as libc::time_t;
+    let mut broken_down: libc::tm = unsafe { std::mem::zeroed() };
+    // SAFETY: `time` es válido y `broken_down` está inicializado en cero y vive
+    // durante toda la llamada.
+    unsafe { libc::localtime_r(&time, &mut broken_down) };
+    format!(
+        "{:04}-{:02}-{:02}",
+        broken_down.tm_year + 1900,
+        broken_down.tm_mon + 1,
+        broken_down.tm_mday
+    )
+}
+
+fn today_local() -> String {
+    let seconds = SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs() as i64)
+        .unwrap_or(0);
+    local_date(seconds)
+}
+
+/// Archivo diario rotado por fecha **local**.
+///
+/// `tracing_appender::rolling::daily` rota en UTC, así que en cualquier huso
+/// al oeste de Greenwich lo que se dicta de noche cae en el archivo del día
+/// siguiente. Buscar "lo de anoche" en el archivo de anoche no lo encontraba.
+struct DailyLocalFile {
+    directory: PathBuf,
+    current_date: String,
+    file: fs::File,
+}
+
+impl DailyLocalFile {
+    fn open(directory: PathBuf) -> io::Result<Self> {
+        let current_date = today_local();
+        let file = Self::open_for(&directory, &current_date)?;
+        Ok(Self { directory, current_date, file })
+    }
+
+    fn open_for(directory: &Path, date: &str) -> io::Result<fs::File> {
+        fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(directory.join(format!("{LOG_FILE_PREFIX}.{date}")))
+    }
+}
+
+impl io::Write for DailyLocalFile {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        let today = today_local();
+        if today != self.current_date {
+            // Si no se puede abrir el archivo nuevo se sigue escribiendo en el
+            // anterior: perder la rotación de un día es mejor que perder los
+            // registros, y anotar la fecha evita reintentar en cada línea.
+            if let Ok(file) = Self::open_for(&self.directory, &today) {
+                self.file = file;
+            }
+            self.current_date = today;
+        }
+        self.file.write(buf)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.file.flush()
+    }
+}
+
 pub fn error_chain(error: &dyn Error) -> String {
     let mut messages = vec![error.to_string()];
     let mut source = error.source();
@@ -55,9 +127,22 @@ pub fn init(config: &LoggingConfig) -> Result<Observability, String> {
                 log_directory = Some(directory.clone());
                 startup_warnings.extend(warnings);
 
-                let appender = tracing_appender::rolling::daily(&directory, LOG_FILE_PREFIX);
+                let appender = match DailyLocalFile::open(directory.clone()) {
+                    Ok(appender) => appender,
+                    Err(error) => {
+                        return Err(format!(
+                            "No se pudo abrir el archivo de logs en {}: {error}",
+                            directory.display()
+                        ));
+                    }
+                };
                 let (non_blocking, guard) = tracing_appender::non_blocking(appender);
                 worker_guard = Some(guard);
+
+                // La limpieza del arranque sólo alcanza si la aplicación se
+                // reinicia seguido. Repetirla mientras corre hace que la
+                // retención se cumpla sola aunque quede semanas abierta.
+                spawn_retention_task(directory.clone(), config.retention_days);
 
                 let console_layer = console_layer();
                 let file_layer = fmt::layer()
@@ -105,6 +190,24 @@ pub fn init(config: &LoggingConfig) -> Result<Observability, String> {
         log_directory,
         _worker_guard: worker_guard,
     })
+}
+
+fn spawn_retention_task(directory: PathBuf, retention_days: u64) {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(SECONDS_PER_DAY));
+        // El primer disparo es inmediato y el arranque ya limpió.
+        interval.tick().await;
+        loop {
+            interval.tick().await;
+            match cleanup_old_logs(&directory, retention_days) {
+                Ok(0) => {}
+                Ok(removed) => tracing::info!(removed, retention_days, "Se limpiaron logs vencidos"),
+                Err(error) => {
+                    tracing::warn!(code="TRN-LOG-CLEANUP", error=%error, "No se pudieron limpiar los logs vencidos");
+                }
+            }
+        }
+    });
 }
 
 fn console_layer<S>() -> impl Layer<S>
@@ -210,9 +313,87 @@ fn cleanup_old_logs(directory: &Path, retention_days: u64) -> io::Result<usize> 
 
 #[cfg(test)]
 mod tests {
-    use super::{LOG_FILE_PREFIX, cleanup_old_logs, configured_filter};
+    use super::{DailyLocalFile, LOG_FILE_PREFIX, cleanup_old_logs, configured_filter, local_date};
     use std::fs;
+    use std::io::Write;
     use std::time::Duration;
+
+    #[test]
+    fn local_date_has_the_expected_shape() {
+        let date = local_date(1_785_000_000);
+        assert_eq!(date.len(), 10, "{date}");
+        let parts: Vec<&str> = date.split('-').collect();
+        assert_eq!(parts.len(), 3);
+        assert_eq!((parts[0].len(), parts[1].len(), parts[2].len()), (4, 2, 2));
+        assert!(parts.iter().all(|p| p.chars().all(|c| c.is_ascii_digit())));
+    }
+
+    /// Fecha UTC del mismo instante, para contrastar contra la local.
+    fn utc_date(seconds_since_epoch: i64) -> String {
+        let time = seconds_since_epoch as libc::time_t;
+        let mut broken_down: libc::tm = unsafe { std::mem::zeroed() };
+        unsafe { libc::gmtime_r(&time, &mut broken_down) };
+        format!(
+            "{:04}-{:02}-{:02}",
+            broken_down.tm_year + 1900,
+            broken_down.tm_mon + 1,
+            broken_down.tm_mday
+        )
+    }
+
+    fn local_offset_seconds(seconds_since_epoch: i64) -> i64 {
+        let time = seconds_since_epoch as libc::time_t;
+        let mut broken_down: libc::tm = unsafe { std::mem::zeroed() };
+        unsafe { libc::localtime_r(&time, &mut broken_down) };
+        broken_down.tm_gmtoff as i64
+    }
+
+    #[test]
+    fn local_date_follows_the_local_offset_and_not_utc() {
+        // Se contrasta contra la fecha UTC del instante corrido por el desfase
+        // local. En un entorno UTC —el runner de CI— ambas coinciden y el test
+        // sigue siendo válido; en uno con desfase, comprueba justamente lo que
+        // se quería arreglar.
+        for timestamp in [1_785_000_000, 1_785_043_000, 1_785_086_399] {
+            let offset = local_offset_seconds(timestamp);
+            assert_eq!(
+                local_date(timestamp),
+                utc_date(timestamp + offset),
+                "desfase {offset}s en el instante {timestamp}"
+            );
+        }
+    }
+
+    #[test]
+    fn local_date_is_stable_and_advances_with_the_days() {
+        let base = 1_785_000_000;
+        assert_eq!(local_date(base), local_date(base));
+        // Dos días evitan cualquier ambigüedad por cambios de horario.
+        assert_ne!(local_date(base), local_date(base + 2 * 24 * 60 * 60));
+    }
+
+    #[test]
+    fn the_appender_writes_to_a_file_named_after_the_local_date() {
+        let directory = std::env::temp_dir()
+            .join(format!("transcriptor-appender-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&directory);
+        fs::create_dir_all(&directory).expect("test log directory");
+
+        let mut appender = DailyLocalFile::open(directory.clone()).expect("appender");
+        appender.write_all(b"linea\n").expect("write");
+        appender.flush().expect("flush");
+
+        let expected = directory.join(format!("{LOG_FILE_PREFIX}.{}", super::today_local()));
+        assert_eq!(fs::read_to_string(&expected).expect("log file"), "linea\n");
+
+        // Reabrir no pisa lo ya escrito: el archivo del día se acumula.
+        let mut again = DailyLocalFile::open(directory.clone()).expect("appender");
+        again.write_all(b"otra\n").expect("write");
+        again.flush().expect("flush");
+        assert_eq!(fs::read_to_string(&expected).expect("log file"), "linea\notra\n");
+
+        let _ = fs::remove_dir_all(&directory);
+    }
 
     #[test]
     fn configured_filter_falls_back_to_info() {

@@ -1,0 +1,11 @@
+# Toolchain fijo para que local y CI compilen con el mismo rustc.
+#
+# Sin esto, CI usaba el último stable y la máquina de desarrollo el que tuviera
+# instalado. Clippy gana lints en cada versión, así que `make check` pasaba en
+# local y el mismo commit fallaba en CI con avisos que acá no existían.
+#
+# Subir esta versión es un commit deliberado, no un efecto secundario de que
+# haya salido un stable nuevo.
+[toolchain]
+channel = "1.97.1"
+components = ["clippy", "rustfmt"]

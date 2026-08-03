@@ -112,6 +112,12 @@ La CI (`.github/workflows/ci.yml`) corre build, tests y clippy en cada PR.
 Clippy corre con `-D warnings`: cualquier aviso nuevo bloquea el merge. Antes de
 abrir un PR conviene correr `make check` (clippy + tests).
 
+El toolchain está fijado en `rust-toolchain.toml` y es la única fuente de
+verdad: rustup lo respeta tanto en tu máquina como en el runner. Sin eso, CI
+usaba el último stable y local el que estuviera instalado, y como clippy suma
+lints en cada versión, `make check` pasaba acá y el mismo commit fallaba allá.
+Subir la versión es un commit deliberado.
+
 Un límite conocido: **compila con `--no-default-features`**, porque GTK4 Layer
 Shell no está empaquetado en Ubuntu 24.04, que es la imagen del runner. Queda
 cubierto config, pipeline, transcripción y observabilidad, que es donde está la

@@ -111,10 +111,11 @@ pub async fn run_state_machine(
                     (_, KeyEvent::DecreaseGain) => {
                         let _ = cmd_tx.send(Command::DecreaseGain);
                     }
+                    // Acá sólo llegan Idle y WaitingForLatch: RecordingPush y
+                    // RecordingTap consumen su propio Up en los brazos de
+                    // arriba, así que la guarda que había era siempre cierta.
                     (_, KeyEvent::Up) => {
-                        if state != InternalState::RecordingPush && !matches!(state, InternalState::RecordingTap { .. }) {
-                            state = InternalState::Idle;
-                        }
+                        state = InternalState::Idle;
                     }
                     
                     _ => {}

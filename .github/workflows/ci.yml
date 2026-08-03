@@ -15,9 +15,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy
+      # No se fija el toolchain acá: `rust-toolchain.toml` es la única fuente de
+      # verdad, y rustup —preinstalado en el runner— lo respeta solo. Con
+      # `@stable` el runner usaba el último stable y la máquina de desarrollo
+      # otro, así que clippy encontraba lints que en local no existían.
+      - name: Mostrar toolchain efectivo
+        run: rustc --version && cargo clippy --version
 
       - uses: Swatinem/rust-cache@v2
 

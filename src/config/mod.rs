@@ -384,7 +384,8 @@ impl AppConfig {
                             v.as_str().map(|s| (k, s.to_string()))
                         })
                         .collect();
-                    dict.sort_by(|a, b| b.0.len().cmp(&a.0.len()));
+                    // De más largo a más corto: el patrón más específico gana.
+                    dict.sort_by_key(|(pattern, _)| std::cmp::Reverse(pattern.len()));
                     config.dictionary = dict;
                 }
             }

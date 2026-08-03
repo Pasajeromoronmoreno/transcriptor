@@ -4,6 +4,35 @@ tap_timeout_ms = 250
 push_release_window_ms = 150
 # Multiplicador digital del volumen (por defecto 1.0)
 audio_multiplier = 14.0
+# Dispositivo de captura para parec. Vacío o ausente usa la fuente por defecto
+# del sistema. Sirve para mandar el dictado a una fuente ya procesada —por
+# ejemplo la de EasyEffects— sin cambiar la fuente por defecto de todo el
+# sistema, que afectaría también a videollamadas.
+# Listar las disponibles con: pactl list short sources
+# device = "easyeffects_source"
+
+# Puerta de ruido: descarta el audio que queda por debajo del umbral, para que
+# el ruido de fondo de las pausas no llegue a la transcripción.
+#
+# No separa el fondo de la voz cuando suenan a la vez: eso viaja en las mismas
+# muestras y ningún umbral lo resuelve. Lo que sí elimina es el fondo constante
+# de los silencios, que es lo que ensucia el resultado.
+#
+# Viene apagada porque los umbrales dependen del micrófono y del ambiente; un
+# valor genérico cortaría la voz en unos equipos y no filtraría nada en otros.
+# Para calibrarla hacen falta dos mediciones, una de fondo y otra hablando:
+#     parec --device=<fuente> --format=s16le --rate=16000 --channels=1 > /tmp/m.pcm
+# El umbral de apertura va entre ambos niveles; el de cierre, unos dB por debajo.
+[gate]
+enabled = false
+# Nivel a partir del cual se empieza a grabar, en dBFS.
+open_threshold_dbfs = -27.0
+# Nivel por debajo del cual se corta. Más bajo que el de apertura para que la
+# puerta no castañetee en el borde del umbral.
+close_threshold_dbfs = -31.0
+# Cuánto se sostiene abierta tras caer por debajo, para no comerse las pausas
+# entre palabras.
+release_ms = 250
 
 [logging]
 # Nivel por defecto; RUST_LOG lo puede sobrescribir temporalmente.

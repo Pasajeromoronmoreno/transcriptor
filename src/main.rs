@@ -90,11 +90,23 @@ async fn main() {
     }
 
     // Iniciar captura de audio
-    let hot_mic = match audio::capture::HotMic::start(config.audio_multiplier).await {
+    let hot_mic = match audio::capture::HotMic::start(
+        config.audio_multiplier,
+        config.capture_device.as_deref(),
+        &config.gate,
+    )
+    .await
+    {
         Ok(mic) => {
             let m = Arc::new(mic);
             start_volume_monitor(m.clone());
-            tracing::info!("Audio listo");
+            tracing::info!(
+                device = config.capture_device.as_deref().unwrap_or("(fuente por defecto)"),
+                gate = config.gate.enabled,
+                gate_open_dbfs = config.gate.open_threshold_dbfs,
+                gate_close_dbfs = config.gate.close_threshold_dbfs,
+                "Audio listo"
+            );
             m
         }
         Err(e) => {

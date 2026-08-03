@@ -5,6 +5,8 @@ use tokio::sync::mpsc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering, AtomicU16};
 use tokio::sync::Mutex;
+use crate::audio::gate::NoiseGate;
+use crate::config::GateConfig;
 
 /// HotMic re-diseñado para ser 100% atómico.
 pub struct HotMic {
@@ -12,12 +14,22 @@ pub struct HotMic {
     is_recording: Arc<AtomicBool>,
     current_volume: Arc<AtomicU16>,
     audio_multiplier: Arc<std::sync::atomic::AtomicU32>, // f32 almacenado en bits
+    /// `None` cuando la puerta está desactivada: el audio pasa entero.
+    gate: Option<Arc<Mutex<NoiseGate>>>,
     _kill_tx: mpsc::Sender<()>,
 }
 
 impl HotMic {
-    pub async fn start(initial_multiplier: f32) -> Result<Self, Box<dyn std::error::Error>> {
-        let mut child = Command::new("parec")
+    pub async fn start(
+        initial_multiplier: f32,
+        capture_device: Option<&str>,
+        gate_config: &GateConfig,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        let mut command = Command::new("parec");
+        if let Some(device) = capture_device {
+            command.arg(format!("--device={device}"));
+        }
+        let mut child = command
             .arg("--format=s16le")
             .arg("--rate=16000")
             .arg("--channels=1")
@@ -39,6 +51,10 @@ impl HotMic {
         let current_volume_clone = current_volume.clone();
         let audio_multiplier = Arc::new(std::sync::atomic::AtomicU32::new(initial_multiplier.to_bits()));
         let audio_multiplier_clone = audio_multiplier.clone();
+        let gate = gate_config
+            .enabled
+            .then(|| Arc::new(Mutex::new(NoiseGate::new(gate_config))));
+        let gate_clone = gate.clone();
         
         let (kill_tx, mut kill_rx) = mpsc::channel::<()>(1);
 
@@ -74,8 +90,17 @@ impl HotMic {
                                 current_volume_clone.store(peak, Ordering::Relaxed);
 
                                 if is_recording_clone.load(Ordering::SeqCst) {
-                                    let mut b = buffer_clone.lock().await;
-                                    b.extend_from_slice(&processed_buf);
+                                    // El volumen se mide antes de la puerta: el
+                                    // monitor tiene que mostrar lo que entra,
+                                    // que es lo que se usa para calibrarla.
+                                    let kept = match gate_clone.as_ref() {
+                                        Some(gate) => gate.lock().await.filter(&processed_buf),
+                                        None => processed_buf,
+                                    };
+                                    if !kept.is_empty() {
+                                        let mut b = buffer_clone.lock().await;
+                                        b.extend_from_slice(&kept);
+                                    }
                                 }
                             }
                             Err(error) => {
@@ -88,7 +113,7 @@ impl HotMic {
             }
         });
 
-        Ok(HotMic { buffer, is_recording, current_volume, audio_multiplier, _kill_tx: kill_tx })
+        Ok(HotMic { buffer, is_recording, current_volume, audio_multiplier, gate, _kill_tx: kill_tx })
     }
 
     pub fn get_volume(&self) -> u16 {
@@ -104,6 +129,11 @@ impl HotMic {
     }
 
     pub async fn start_recording(&self) {
+        // La puerta se reinicia antes de habilitar la grabación: si arrancara
+        // con el sostenimiento del dictado anterior, dejaría entrar el fondo.
+        if let Some(gate) = self.gate.as_ref() {
+            gate.lock().await.reset();
+        }
         let mut b = self.buffer.lock().await;
         b.clear(); // Limpiar rastro anterior obligatoriamente
         self.is_recording.store(true, Ordering::SeqCst);
@@ -111,7 +141,16 @@ impl HotMic {
 
     pub async fn stop_recording(&self) -> Vec<u8> {
         self.is_recording.store(false, Ordering::SeqCst);
-        
+
+        // La cola que no completó una ventana entra igual, para no cortar la
+        // última consonante.
+        if let Some(gate) = self.gate.as_ref() {
+            let tail = gate.lock().await.flush();
+            if !tail.is_empty() {
+                self.buffer.lock().await.extend_from_slice(&tail);
+            }
+        }
+
         let mut b = self.buffer.lock().await;
         let pcm: Vec<u8> = b.drain(..).collect(); // Drenar hasta el último byte
         drop(b);
@@ -131,6 +170,9 @@ impl HotMic {
     pub async fn discard_recording(&self) -> Option<usize> {
         if !self.is_recording.swap(false, Ordering::SeqCst) {
             return None;
+        }
+        if let Some(gate) = self.gate.as_ref() {
+            gate.lock().await.reset();
         }
         let mut b = self.buffer.lock().await;
         let discarded = b.len();

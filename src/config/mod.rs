@@ -14,6 +14,7 @@ struct TomlConfig {
     hotkeys: Option<HotkeysToml>,
     logging: Option<LoggingToml>,
     retry: Option<RetryToml>,
+    gate: Option<GateToml>,
 }
 
 #[derive(Deserialize, Debug)]
@@ -22,6 +23,15 @@ struct InputToml {
     tap_timeout_ms: Option<u64>,
     push_release_window_ms: Option<u64>,
     audio_multiplier: Option<f32>,
+    device: Option<String>,
+}
+
+#[derive(Deserialize, Debug)]
+struct GateToml {
+    enabled: Option<bool>,
+    open_threshold_dbfs: Option<f32>,
+    close_threshold_dbfs: Option<f32>,
+    release_ms: Option<u64>,
 }
 
 #[derive(Deserialize, Debug)]
@@ -83,6 +93,34 @@ pub struct LoggingConfig {
     pub retention_days: u64,
 }
 
+/// Puerta de ruido. Sólo se exponen los umbrales y el sostenimiento: son las
+/// tres perillas que hay que tocar para calibrarla contra un ambiente.
+#[derive(Clone, Debug, PartialEq)]
+pub struct GateConfig {
+    pub enabled: bool,
+    /// Nivel a partir del cual se empieza a grabar, en dBFS.
+    pub open_threshold_dbfs: f32,
+    /// Nivel por debajo del cual se vuelve a cortar. Más bajo que el de
+    /// apertura, para que la puerta no castañetee en el borde.
+    pub close_threshold_dbfs: f32,
+    /// Cuánto se sostiene abierta tras caer por debajo, para no comerse las
+    /// pausas entre palabras.
+    pub release: Duration,
+}
+
+impl Default for GateConfig {
+    fn default() -> Self {
+        // Apagada por defecto: los umbrales dependen del micrófono y del
+        // ambiente, así que un valor genérico haría más daño que bien.
+        Self {
+            enabled: false,
+            open_threshold_dbfs: -27.0,
+            close_threshold_dbfs: -31.0,
+            release: Duration::from_millis(250),
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct RetryConfig {
     pub max_attempts: u32,
@@ -138,6 +176,10 @@ pub struct AppConfig {
     pub hotkey_increase_gain: KeyCode,
     pub hotkey_decrease_gain: KeyCode,
     pub audio_multiplier: f32,
+    /// Dispositivo de captura para `parec`. `None` usa la fuente por defecto
+    /// del sistema.
+    pub capture_device: Option<String>,
+    pub gate: GateConfig,
     pub dictionary: Vec<(String, String)>,
     pub dictionary_enabled: bool,
     pub config_path: Option<PathBuf>,
@@ -174,6 +216,8 @@ impl Default for AppConfig {
             hotkey_increase_gain: KeyCode::KEY_UP,
             hotkey_decrease_gain: KeyCode::KEY_DOWN,
             audio_multiplier: 1.0,
+            capture_device: None,
+            gate: GateConfig::default(),
             dictionary: Vec::new(),
             dictionary_enabled: true,
             config_path: None,
@@ -277,6 +321,12 @@ impl AppConfig {
                     if let Some(v) = input.audio_multiplier {
                         config.audio_multiplier = v;
                     }
+                    // Una cadena vacía se trata como "sin especificar", para
+                    // que dejar la clave puesta no rompa la captura.
+                    config.capture_device = input
+                        .device
+                        .map(|value| value.trim().to_string())
+                        .filter(|value| !value.is_empty());
                 }
                 if let Some(groq) = t.groq {
                     if let Some(v) = groq.api_key {
@@ -362,6 +412,23 @@ impl AppConfig {
                     if let Some(v) = retry.initial_delay_ms { config.retry.initial_delay = Duration::from_millis(v); }
                     if let Some(v) = retry.max_delay_ms { config.retry.max_delay = Duration::from_millis(v); }
                     if let Some(v) = retry.jitter_ms { config.retry.jitter = Duration::from_millis(v); }
+                }
+                if let Some(gate) = t.gate {
+                    if let Some(v) = gate.enabled { config.gate.enabled = v; }
+                    if let Some(v) = gate.open_threshold_dbfs { config.gate.open_threshold_dbfs = v; }
+                    if let Some(v) = gate.close_threshold_dbfs { config.gate.close_threshold_dbfs = v; }
+                    if let Some(v) = gate.release_ms { config.gate.release = Duration::from_millis(v); }
+
+                    // Si el umbral de cierre queda por encima del de apertura la
+                    // histéresis se invierte y la puerta nunca cierra. Se corrige
+                    // y se avisa, en vez de dejar un gate que no filtra nada.
+                    if config.gate.close_threshold_dbfs > config.gate.open_threshold_dbfs {
+                        config.startup_warnings.push(format!(
+                            "gate.close_threshold_dbfs ({}) es mayor que open_threshold_dbfs ({}); se iguala al de apertura",
+                            config.gate.close_threshold_dbfs, config.gate.open_threshold_dbfs
+                        ));
+                        config.gate.close_threshold_dbfs = config.gate.open_threshold_dbfs;
+                    }
                 }
 
                 // Cargar diccionario de reemplazos
@@ -544,6 +611,57 @@ mod tests {
         assert_eq!(config.retry.initial_delay, std::time::Duration::from_millis(25));
         assert_eq!(config.groq_connect_timeout, std::time::Duration::from_millis(200));
         assert_eq!(config.groq_request_timeout, std::time::Duration::from_millis(900));
+    }
+
+    #[test]
+    fn gate_is_off_by_default_because_thresholds_depend_on_the_room() {
+        let config = AppConfig::default();
+        assert!(!config.gate.enabled);
+        assert!(config.gate.close_threshold_dbfs <= config.gate.open_threshold_dbfs);
+    }
+
+    #[test]
+    fn gate_thresholds_are_configurable() {
+        let mut config = AppConfig::default();
+        AppConfig::parse_toml(
+            r#"
+                [gate]
+                enabled = true
+                open_threshold_dbfs = -27.0
+                close_threshold_dbfs = -31.0
+                release_ms = 250
+            "#,
+            &mut config,
+        );
+
+        assert!(config.gate.enabled);
+        assert_eq!(config.gate.open_threshold_dbfs, -27.0);
+        assert_eq!(config.gate.close_threshold_dbfs, -31.0);
+        assert_eq!(config.gate.release, std::time::Duration::from_millis(250));
+    }
+
+    #[test]
+    fn an_inverted_hysteresis_is_corrected_and_reported() {
+        let mut config = AppConfig::default();
+        // Cerrar por encima de abrir dejaría la puerta trabada abierta.
+        AppConfig::parse_toml(
+            "[gate]\nopen_threshold_dbfs = -30.0\nclose_threshold_dbfs = -20.0",
+            &mut config,
+        );
+
+        assert_eq!(config.gate.close_threshold_dbfs, -30.0);
+        assert!(config.startup_warnings.iter().any(|w| w.contains("close_threshold_dbfs")));
+    }
+
+    #[test]
+    fn capture_device_is_optional_and_blank_means_system_default() {
+        let mut config = AppConfig::default();
+        AppConfig::parse_toml("[input]\ndevice = \"easyeffects_source\"", &mut config);
+        assert_eq!(config.capture_device.as_deref(), Some("easyeffects_source"));
+
+        let mut blank = AppConfig::default();
+        AppConfig::parse_toml("[input]\ndevice = \"   \"", &mut blank);
+        assert_eq!(blank.capture_device, None);
     }
 
     #[test]

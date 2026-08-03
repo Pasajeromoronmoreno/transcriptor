@@ -12,6 +12,9 @@ use thiserror::Error;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 const MAX_PCM_BYTES: usize = 24 * 1024 * 1024;
+/// Cuánto se deja el aviso de error en pantalla antes de volver a reposo.
+/// Suficiente para leer el código, poco para que estorbe.
+const ERROR_NOTICE: std::time::Duration = std::time::Duration::from_secs(5);
 static SESSION_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 /// Dependencias compartidas por todas las sesiones. Se arman una vez en `main`
@@ -180,7 +183,7 @@ async fn spawn_finish(
 
     if wav.len() <= 8044 {
         tracing::warn!(code="TRN-AUDIO-EMPTY", wav_bytes=wav.len(), "La captura no contiene audio suficiente");
-        overlay.publish(AppPhase::Error, None, Some("Sin audio · TRN-AUDIO-EMPTY".into()));
+        overlay.publish_transient_error("Sin audio · TRN-AUDIO-EMPTY".into(), ERROR_NOTICE);
         profiler.finish();
         return None;
     }
@@ -230,14 +233,14 @@ async fn finish_recording(
                 Ok(()) => overlay.publish(AppPhase::Idle, None, None),
                 Err(error) => {
                     tracing::error!(code=error.code(), error=%error, "Fallo entregando transcripción");
-                    overlay.publish(AppPhase::Error, None, Some(format!("Error de salida · {}", error.code())));
+                    overlay.publish_transient_error(format!("Error de salida · {}", error.code()), ERROR_NOTICE);
                 }
             }
         }
         Err(error) => {
             tracing::error!(code=error.code(), status=error.status(), request_id=error.request_id(), error=%error, error_chain=%crate::observability::error_chain(&error), "Fallo definitivo de transcripción");
             eprintln!("❌ Error Groq [{}]: {error:?}", error.code());
-            overlay.publish(AppPhase::Error, None, Some(format!("Error de transcripción · {}", error.code())));
+            overlay.publish_transient_error(format!("Error de transcripción · {}", error.code()), ERROR_NOTICE);
             profiler.finish();
         }
     }

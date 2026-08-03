@@ -96,6 +96,32 @@ impl OverlayHub {
         });
     }
 
+    /// Muestra un error y lo borra solo pasado `after`.
+    ///
+    /// Sin esto el cartel queda colgado hasta el próximo dictado: los estados
+    /// de error no tienen quién los suceda, porque la sesión que los produjo ya
+    /// terminó.
+    ///
+    /// Si algo publicó otro estado mientras tanto —un dictado nuevo, por
+    /// ejemplo— no se toca nada: borrar a ciegas apagaría el cartel de una
+    /// grabación en curso.
+    pub fn publish_transient_error(&self, message: String, after: std::time::Duration) {
+        self.publish(AppPhase::Error, None, Some(message.clone()));
+
+        let hub = self.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(after).await;
+            let still_showing = {
+                let current = hub.tx.borrow();
+                current.phase == AppPhase::Error
+                    && current.message.as_deref() == Some(message.as_str())
+            };
+            if still_showing {
+                hub.publish(AppPhase::Idle, None, None);
+            }
+        });
+    }
+
     #[cfg(any(feature = "overlay", test))]
     fn subscribe(&self) -> watch::Receiver<OverlayStatus> {
         self.tx.subscribe()
@@ -355,6 +381,7 @@ mod ui {
 #[cfg(test)]
 mod tests {
     use super::{AppPhase, OverlayHub, RecordingMode};
+    use std::time::Duration;
 
     #[test]
     fn publishes_serializable_recording_state() {
@@ -385,6 +412,45 @@ mod tests {
         assert_eq!(status.phase, AppPhase::Idle);
         assert_eq!(status.mode, None);
         assert_eq!(status.started_at_ms, None);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_transient_error_clears_itself() {
+        let hub = OverlayHub::new();
+        let mut rx = hub.subscribe();
+
+        hub.publish_transient_error("Sin audio · TRN-AUDIO-EMPTY".into(), Duration::from_secs(5));
+        // Sin este relevo la tarea ni siquiera arranca, y su temporizador no
+        // queda registrado antes de adelantar el reloj.
+        tokio::task::yield_now().await;
+        assert_eq!(rx.borrow_and_update().phase, AppPhase::Error);
+
+        // Antes de vencer sigue visible: el aviso tiene que poder leerse.
+        tokio::time::advance(Duration::from_secs(4)).await;
+        tokio::task::yield_now().await;
+        assert_eq!(rx.borrow_and_update().phase, AppPhase::Error);
+
+        tokio::time::advance(Duration::from_secs(2)).await;
+        tokio::task::yield_now().await;
+        assert_eq!(rx.borrow_and_update().phase, AppPhase::Idle);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_transient_error_does_not_wipe_a_newer_state() {
+        let hub = OverlayHub::new();
+        let mut rx = hub.subscribe();
+
+        hub.publish_transient_error("Error de transcripción · X".into(), Duration::from_secs(5));
+        tokio::task::yield_now().await;
+        // El usuario arranca otro dictado antes de que venza el aviso.
+        hub.publish(AppPhase::Recording, Some(RecordingMode::Tap), None);
+
+        tokio::time::advance(Duration::from_secs(10)).await;
+        tokio::task::yield_now().await;
+
+        let status = rx.borrow_and_update().clone();
+        assert_eq!(status.phase, AppPhase::Recording, "no debe apagar una grabación en curso");
+        assert_eq!(status.mode, Some(RecordingMode::Tap));
     }
 
     #[test]

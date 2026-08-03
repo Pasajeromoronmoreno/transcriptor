@@ -61,6 +61,7 @@ struct OutputToml {
     auto_enter_delay_ms: Option<u64>,
     add_period: Option<bool>,
     export_audio: Option<bool>,
+    restore_clipboard: Option<bool>,
 }
 
 #[derive(Deserialize, Debug)]
@@ -167,6 +168,10 @@ pub struct AppConfig {
     pub auto_enter_delay: Duration,
     pub add_period: bool,
     pub export_audio: bool,
+    /// Devuelve al portapapeles el contenido anterior al dictado, una vez
+    /// pegado. Sólo aplica cuando `paste_to_input` está activo: si no se pega,
+    /// el portapapeles es el destino real y no hay nada que devolver.
+    pub restore_clipboard: bool,
     pub pipeline_mode: PipelineMode,
     pub chunk_window: Duration,
     pub profile_latency: bool,
@@ -209,6 +214,7 @@ impl Default for AppConfig {
             auto_enter_delay: Duration::from_millis(30),
             add_period: true,
             export_audio: false,
+            restore_clipboard: true,
             pipeline_mode: PipelineMode::Robust,
             chunk_window: Duration::from_millis(800),
             profile_latency: false,
@@ -369,6 +375,9 @@ impl AppConfig {
                     }
                     if let Some(v) = out.export_audio {
                         config.export_audio = v;
+                    }
+                    if let Some(v) = out.restore_clipboard {
+                        config.restore_clipboard = v;
                     }
                 }
                 if let Some(pipe) = t.pipeline {

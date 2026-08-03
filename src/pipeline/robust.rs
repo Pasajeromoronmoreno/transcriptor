@@ -253,6 +253,16 @@ enum DeliveryError {
 }
 impl DeliveryError { fn code(&self) -> &'static str { match self { Self::Clipboard(_) => "TRN-OUTPUT-CLIPBOARD", Self::Uinput(_) => "TRN-OUTPUT-UINPUT" } } }
 
+/// Si corresponde preservar el portapapeles anterior alrededor de este pegado.
+///
+/// Sólo tiene sentido cuando el portapapeles es un medio de transporte hacia
+/// el pegado por `uinput`. Si no se va a pegar, el portapapeles es el destino
+/// real que el usuario pidió, y pisarlo es la acción, no un efecto colateral
+/// a deshacer.
+fn should_preserve_clipboard(paste_to_input: bool, restore_clipboard: bool) -> bool {
+    paste_to_input && restore_clipboard
+}
+
 async fn deliver_text(text: &str, context: &PipelineContext, add_period: bool, auto_enter: bool, profiler: &mut PipelineProfiler) -> Result<(), DeliveryError> {
     let config = &context.config;
     let mut final_text = text.trim().to_string();
@@ -281,6 +291,16 @@ async fn deliver_text(text: &str, context: &PipelineContext, add_period: bool, a
     println!("✅ {}", final_text);
 
     // 3. Copiar al portapapeles (solo si está habilitado en config)
+    //
+    // Si además se va a pegar, el portapapeles es sólo el medio de transporte
+    // hacia el `Shift+Insert`, no el destino que el usuario quería tocar. Se
+    // guarda lo que había antes de pisarlo, para devolverlo después de pegar.
+    // Si no hay contenido textual previo —vacío, o una imagen— no hay nada
+    // que restaurar, y se sigue igual que antes de este cambio.
+    let previous_clipboard = should_preserve_clipboard(config.paste_to_input, config.restore_clipboard)
+        .then(output::clipboard::get_clipboard_text)
+        .flatten();
+
     if config.copy_to_clipboard {
         if let Err(e) = output::clipboard::set_clipboard(&final_text) {
             return Err(DeliveryError::Clipboard(e.to_string()));
@@ -305,6 +325,24 @@ async fn deliver_text(text: &str, context: &PipelineContext, add_period: bool, a
             tokio::time::sleep(config.auto_enter_delay).await;
             output::typer::press_enter().map_err(DeliveryError::Uinput)?;
             profiler.stamp("Simular Enter");
+        } else if previous_clipboard.is_some() {
+            // Sin Enter automático no hay ninguna espera después del pegado.
+            // Restaurar el portapapeles antes de que la aplicación destino lo
+            // haya leído le entregaría el contenido viejo en vez del dictado:
+            // se reutiliza el mismo margen que usa el camino de auto_enter,
+            // que ya cubre ese mismo riesgo.
+            tokio::time::sleep(config.auto_enter_delay).await;
+        }
+
+        if let Some(previous) = previous_clipboard {
+            match output::clipboard::set_clipboard(&previous) {
+                Ok(()) => profiler.stamp("Restaurar portapapeles anterior"),
+                Err(error) => tracing::warn!(
+                    code = "TRN-OUTPUT-CLIPBOARD-RESTORE",
+                    error = %error,
+                    "No se pudo restaurar el portapapeles anterior"
+                ),
+            }
         }
     }
 
@@ -337,5 +375,32 @@ async fn auto_split_monitor(mic: Arc<HotMic>, context: PipelineContext, mut canc
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::should_preserve_clipboard;
+
+    #[test]
+    fn preserves_only_when_pasting_and_restoring_are_both_on() {
+        assert!(should_preserve_clipboard(true, true));
+    }
+
+    #[test]
+    fn does_not_preserve_without_pasting() {
+        // Sin pegado el portapapeles ES el destino que pidió el usuario:
+        // pisarlo es la acción, no algo para deshacer después.
+        assert!(!should_preserve_clipboard(false, true));
+    }
+
+    #[test]
+    fn does_not_preserve_when_the_option_is_off() {
+        assert!(!should_preserve_clipboard(true, false));
+    }
+
+    #[test]
+    fn does_not_preserve_with_both_off() {
+        assert!(!should_preserve_clipboard(false, false));
     }
 }

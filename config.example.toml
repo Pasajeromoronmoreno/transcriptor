@@ -93,6 +93,11 @@ auto_enter_delay_ms = 10
 add_period = true
 # Exportar la última grabación a audio_exports/last_capture.wav (para debugging/experimentos)
 export_audio = false
+# Al pegar (paste_to_input), devuelve el portapapeles a lo que tenía antes del
+# dictado. Sin esto, cada dictado pisa lo que tuvieras copiado. Sólo aplica si
+# paste_to_input está activo: si no se pega, el portapapeles ES el destino que
+# se pidió, y no hay nada que devolver.
+restore_clipboard = true
 
 [pipeline]
 # "robust" = graba todo, transcribe al final (recomendado)

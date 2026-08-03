@@ -52,10 +52,27 @@ squash desde un PR.
 | `perf/`  | optimización sin cambio de comportamiento |
 | `chore/` | tooling, CI, mantenimiento               |
 | `docs/`  | documentación                            |
+| `abandoned/` | camino probado que no funcionó       |
 
 Commits en inglés, formato Conventional Commits, atómicos: un commit por
 unidad lógica. El patrón que ya venís usando —`docs:` de diseño primero,
 después `feat:`/`fix:`, después `test:`— funciona bien y conviene sostenerlo.
+
+### Ramas abandonadas
+
+Una rama que se probó y no funcionó no se borra en silencio ni se deja con
+prefijo `feat/`, donde parece trabajo pendiente de mergear. Se renombra a
+`abandoned/` y se le adjunta el motivo con `git notes`:
+
+```bash
+git branch -m feat/lo-que-sea abandoned/lo-que-sea
+git notes add -m 'ABANDONADA — por qué, cuál es el modo de falla, qué queda abierto' abandoned/lo-que-sea
+git notes show abandoned/lo-que-sea
+```
+
+Así la rama sigue sirviendo para lo único que sirve: que nadie —vos dentro de
+seis meses incluido— vuelva a recorrer el mismo camino sin saber que ya se
+recorrió. `git notes` no se pushea por defecto; es información local.
 
 ## Worktrees
 

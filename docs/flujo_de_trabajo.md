@@ -5,28 +5,40 @@ nunca se rompa mientras hay desarrollo en curso.
 
 ## Reglas duras
 
-1. **Nunca `git push --tags`, `--mirror` ni `--follow-tags`.** Los tags
-   `archive/master` y `archive/experiment-prompts` apuntan a la historia vieja
-   del proyecto, que contiene una API key de Groq hardcodeada en `config.toml`
-   en 29 commits. Ninguna rama actual la contiene, pero esos tags sí. Se
-   pushean ramas y tags de versión de forma explícita, nunca en bloque.
-2. **`config.toml` y `.env` no se versionan.** La configuración pública de
-   referencia vive en `config.example.toml`.
-3. **`main` refleja lo que corre en la máquina.** Si `main` y el binario
+1. **`config.toml` y `.env` no se versionan.** Viven en
+   `~/.config/transcriptor/`. La configuración pública de referencia vive en
+   `config.example.toml`.
+2. **`main` refleja lo que corre en la máquina.** Si `main` y el binario
    instalado divergen, se corrige `main`.
+3. **Se pushean ramas y tags de versión de forma explícita, nunca en bloque.**
+
+Los tags `archive/master` y `archive/experiment-prompts`, que contenían una API
+key de Groq hardcodeada, se borraron el 3 de agosto de 2026. Su historia quedó
+respaldada en `~/Documentos/transcriptor-historia-archivada-2026-08-03.bundle`,
+que **sigue conteniendo esa key**: no se comparte ni se sube a ningún lado.
 
 ## Binario de uso diario
 
 El binario que usás para dictar **no** debe ser el de `target/`, porque
-cualquier `cargo build` lo pisa en medio del día.
+cualquier `cargo build` lo pisa en medio del día. Todo lo que hay bajo `target/`
+es salida de compilación descartable; el ejecutable real es el instalado.
 
 ```bash
-cargo build --release
-install -Dm755 target/release/transcriptor ~/.local/bin/transcriptor
+make install
 ```
 
 Se actualiza a mano, cuando vos querés, después de probar el cambio. Ese es el
 punto: la actualización es una decisión, no un efecto secundario de compilar.
+
+El lanzador del escritorio (`~/Documentos/Scripts/transcriptor`) apunta a
+`~/.local/bin/transcriptor` y no depende del repositorio.
+
+### La ventana queda en "Finalizado" al salir
+
+Es correcto. El lanzador usa `konsole --hold`, que deja la ventana abierta
+cuando el proceso termina para poder leer el último error. La app sale limpia
+con Ctrl+C en ~100 ms; los Ctrl+C posteriores no hacen nada porque ya no hay
+proceso. Cerrá la ventana normalmente.
 
 ## Ramas
 
@@ -64,17 +76,10 @@ git worktree remove ~/repos/transcriptor-wt/pipeline-cancelation
 
 ### Configuración dentro de un worktree
 
-`config.toml` ya se resuelve por XDG (`~/.config/transcriptor/config.toml`), así
-que funciona en cualquier worktree sin copiar nada.
-
-`.env` es distinto: `dotenvy` lo lee del directorio actual. Enlazalo:
-
-```bash
-ln -s ~/repos/transcriptor/.env ~/repos/transcriptor-wt/<rama>/.env
-```
-
-Alternativa: exportar `GROQ_API_KEY` en el entorno de la shell, que tiene
-prioridad sobre el archivo.
+No hay nada que copiar ni enlazar: tanto `config.toml` como `.env` se resuelven
+por XDG (`~/.config/transcriptor/`), así que cualquier worktree funciona de
+entrada. Exportar `GROQ_API_KEY` en la shell sigue teniendo prioridad sobre el
+archivo, que es lo cómodo para probar con otra key.
 
 ## Pull requests
 
@@ -87,14 +92,13 @@ gh pr merge --squash --delete-branch
 
 La CI (`.github/workflows/ci.yml`) corre build, tests y clippy en cada PR.
 
-Dos límites conocidos:
+Clippy corre con `-D warnings`: cualquier aviso nuevo bloquea el merge. Antes de
+abrir un PR conviene correr `make check` (clippy + tests).
 
-- **Compila con `--no-default-features`.** GTK4 Layer Shell no está empaquetado
-  en Ubuntu 24.04, que es la imagen del runner. Queda cubierto config,
-  pipeline, transcripción y observabilidad, que es donde está la lógica y
-  todos los tests. El overlay se verifica localmente con `cargo build`.
-- **Clippy todavía no bloquea**: el código arrastra avisos previos. Cuando
-  estén saldados, agregar `-- -D warnings` al paso de clippy.
+Un límite conocido: **compila con `--no-default-features`**, porque GTK4 Layer
+Shell no está empaquetado en Ubuntu 24.04, que es la imagen del runner. Queda
+cubierto config, pipeline, transcripción y observabilidad, que es donde está la
+lógica y todos los tests. El overlay se verifica localmente con `cargo build`.
 
 ## Volver atrás
 
@@ -102,8 +106,7 @@ El tag `v0.6.0` marca exactamente el código del binario que venías usando.
 
 ```bash
 git checkout v0.6.0
-cargo build --release
-install -Dm755 target/release/transcriptor ~/.local/bin/transcriptor
+make install
 ```
 
 ## Logs

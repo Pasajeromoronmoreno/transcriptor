@@ -42,8 +42,5 @@ jobs:
       - name: Tests
         run: cargo test --locked --no-default-features
 
-      # Sin `-D warnings` por ahora: el código actual arrastra avisos previos y
-      # no queremos que el primer PR arranque en rojo. Cuando esté limpio,
-      # agregar `-- -D warnings` para que los avisos bloqueen el merge.
       - name: Clippy
-        run: cargo clippy --locked --no-default-features --all-targets
+        run: cargo clippy --locked --no-default-features --all-targets -- -D warnings

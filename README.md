@@ -15,18 +15,50 @@ El proyecto esta en uso diario y el flujo principal hoy es `robust`: grabar, sol
 
 ## Configuracion local
 
-1. Copia `config.example.toml` a `config.toml`.
-2. Copia `.env.example` a `.env`.
-3. Completa `GROQ_API_KEY` dentro de `.env`.
+La configuración vive en `~/.config/transcriptor/`, fuera del repositorio, para
+que el binario instalado no dependa de la copia del código:
+
+1. `mkdir -p ~/.config/transcriptor`
+2. Copia `config.example.toml` a `~/.config/transcriptor/config.toml`.
+3. Copia `.env.example` a `~/.config/transcriptor/.env` y completa
+   `GROQ_API_KEY` ahí (`chmod 600` recomendado).
 4. Ajusta hotkeys y parametros en `config.toml` segun tu entorno.
 
-`config.toml` y `.env` son locales y no se versionan. La app prioriza `GROQ_API_KEY` si esta disponible.
+Tanto `config.toml` como `.env` se buscan en este orden: junto al binario,
+después en `~/.config/transcriptor/` y por último subiendo desde el directorio
+actual. La app prioriza `GROQ_API_KEY` del entorno si esta disponible.
 
 ## Ejecucion
+
+Para desarrollo:
 
 ```bash
 cargo run
 ```
+
+Para instalarlo como programa de escritorio:
+
+```bash
+make install
+```
+
+Eso deja el ejecutable en `~/.local/bin/transcriptor`. Todo lo que hay bajo
+`target/` es salida de compilación descartable: el único ejecutable "real" es el
+instalado, y `make install` es el puente entre los dos.
+
+Sólo puede correr una instancia a la vez: el proceso toma un candado en
+`$XDG_RUNTIME_DIR/transcriptor.lock` y un segundo arranque se rechaza con un
+mensaje claro en vez de pelear por el micrófono y el teclado virtual.
+
+## Atajos
+
+| Atajo | Efecto |
+| --- | --- |
+| Modificador + trigger (corto) | Dictado en modo Tap |
+| Modificador + trigger (sostenido) | Dictado en modo Push |
+| `ESC` | Cancela el dictado en curso: descarta el audio y aborta la llamada a la API sin pegar nada |
+
+Las teclas concretas se configuran en la sección `[hotkeys]`.
 
 ### Overlay global
 

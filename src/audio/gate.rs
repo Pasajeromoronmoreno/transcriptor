@@ -17,7 +17,20 @@ const SAMPLE_RATE: f32 = 16_000.0;
 /// La histéresis —abrir en un nivel y cerrar en otro más bajo— evita el
 /// castañeteo en el borde del umbral, y el tiempo de cierre sostiene la puerta
 /// durante las pausas cortas entre palabras.
+/// Lo que la puerta vio durante un dictado, para poder calibrarla con los
+/// números de la aplicación en vez de con una medición paralela que puede estar
+/// mirando otro punto de la cadena de audio.
+#[derive(Debug, Default, Clone, Copy, PartialEq)]
+pub struct GateStats {
+    pub windows: u32,
+    pub kept: u32,
+    pub p50_dbfs: f32,
+    pub p95_dbfs: f32,
+    pub peak_dbfs: f32,
+}
+
 pub struct NoiseGate {
+    enabled: bool,
     open_level: f32,
     close_level: f32,
     release_windows: u32,
@@ -27,6 +40,8 @@ pub struct NoiseGate {
     /// Se conserva la ventana anterior para emitirla al abrir: sin eso, el
     /// ataque de la primera palabra queda del lado descartado.
     previous: Vec<u8>,
+    levels: Vec<f32>,
+    kept_windows: u32,
 }
 
 impl NoiseGate {
@@ -35,6 +50,7 @@ impl NoiseGate {
             (config.release.as_secs_f32() * SAMPLE_RATE / WINDOW_SAMPLES as f32).ceil() as u32;
 
         Self {
+            enabled: config.enabled,
             open_level: dbfs_to_linear(config.open_threshold_dbfs),
             close_level: dbfs_to_linear(config.close_threshold_dbfs),
             release_windows,
@@ -42,6 +58,8 @@ impl NoiseGate {
             hold: 0,
             pending: Vec::with_capacity(WINDOW_BYTES * 2),
             previous: Vec::new(),
+            levels: Vec::new(),
+            kept_windows: 0,
         }
     }
 
@@ -52,6 +70,34 @@ impl NoiseGate {
         self.hold = 0;
         self.pending.clear();
         self.previous.clear();
+        self.levels.clear();
+        self.kept_windows = 0;
+    }
+
+    /// Entrega lo medido en el dictado que termina y deja el contador en cero.
+    ///
+    /// Se mide siempre, incluso con la puerta desactivada: es justamente cuando
+    /// está apagada que hacen falta estos números para elegir los umbrales.
+    pub fn take_stats(&mut self) -> Option<GateStats> {
+        if self.levels.is_empty() {
+            return None;
+        }
+        let mut sorted = std::mem::take(&mut self.levels);
+        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+
+        let percentile = |fraction: f32| {
+            let index = ((sorted.len() - 1) as f32 * fraction).round() as usize;
+            linear_to_dbfs(sorted[index])
+        };
+        let stats = GateStats {
+            windows: sorted.len() as u32,
+            kept: self.kept_windows,
+            p50_dbfs: percentile(0.50),
+            p95_dbfs: percentile(0.95),
+            peak_dbfs: linear_to_dbfs(*sorted.last().unwrap_or(&0.0)),
+        };
+        self.kept_windows = 0;
+        Some(stats)
     }
 
     /// Consume audio y devuelve sólo lo que pasa la puerta.
@@ -65,6 +111,7 @@ impl NoiseGate {
             consumed += WINDOW_BYTES;
 
             let level = rms(window);
+            self.levels.push(level);
             let was_open = self.open;
 
             if level >= self.open_level {
@@ -81,7 +128,13 @@ impl NoiseGate {
                 }
             }
 
-            if self.open {
+            // Desactivada, la puerta sólo observa: el audio pasa entero pero se
+            // sigue midiendo, que es lo que permite elegir los umbrales.
+            if !self.enabled {
+                self.kept_windows += 1;
+                output.extend_from_slice(window);
+            } else if self.open {
+                self.kept_windows += 1;
                 if !was_open {
                     output.append(&mut self.previous);
                 }
@@ -98,7 +151,7 @@ impl NoiseGate {
     /// Entrega la cola que no llegó a completar una ventana, para no cortar la
     /// última consonante del dictado.
     pub fn flush(&mut self) -> Vec<u8> {
-        let tail = if self.open {
+        let tail = if self.open || !self.enabled {
             std::mem::take(&mut self.pending)
         } else {
             self.pending.clear();
@@ -111,6 +164,10 @@ impl NoiseGate {
 
 fn dbfs_to_linear(dbfs: f32) -> f32 {
     10f32.powf(dbfs / 20.0)
+}
+
+fn linear_to_dbfs(level: f32) -> f32 {
+    if level > 0.0 { 20.0 * level.log10() } else { -120.0 }
 }
 
 /// RMS de la ventana, normalizado a 0..1 sobre la escala de 16 bits.
@@ -218,6 +275,40 @@ mod tests {
         closed.filter(&tone(-60.0, 1));
         closed.filter(&loud[..WINDOW_BYTES / 2]);
         assert!(closed.flush().is_empty());
+    }
+
+    #[test]
+    fn a_disabled_gate_still_measures_but_lets_everything_through() {
+        let mut gate = NoiseGate::new(&GateConfig {
+            enabled: false,
+            ..config(-27.0, -31.0, 0)
+        });
+        // Audio muy por debajo del umbral: con la puerta activa se descartaría.
+        let quiet = tone(-50.0, 4);
+        assert_eq!(gate.filter(&quiet).len(), quiet.len());
+
+        let stats = gate.take_stats().expect("apagada igual mide");
+        assert_eq!(stats.windows, 4);
+        assert_eq!(stats.kept, 4);
+        assert!((stats.p50_dbfs - -50.0).abs() < 1.0, "midió {}", stats.p50_dbfs);
+    }
+
+    #[test]
+    fn stats_report_what_the_gate_discarded() {
+        let mut gate = NoiseGate::new(&config(-27.0, -31.0, 0));
+        gate.filter(&tone(-50.0, 6));
+        gate.filter(&tone(-20.0, 4));
+
+        let stats = gate.take_stats().unwrap();
+        assert_eq!(stats.windows, 10);
+        assert!(stats.kept < stats.windows, "algo tuvo que descartarse");
+        assert!((stats.peak_dbfs - -20.0).abs() < 1.0, "pico {}", stats.peak_dbfs);
+    }
+
+    #[test]
+    fn stats_are_empty_before_any_audio() {
+        let mut gate = NoiseGate::new(&config(-27.0, -31.0, 0));
+        assert!(gate.take_stats().is_none());
     }
 
     #[test]

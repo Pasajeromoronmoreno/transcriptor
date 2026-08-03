@@ -14,8 +14,9 @@ pub struct HotMic {
     is_recording: Arc<AtomicBool>,
     current_volume: Arc<AtomicU16>,
     audio_multiplier: Arc<std::sync::atomic::AtomicU32>, // f32 almacenado en bits
-    /// `None` cuando la puerta está desactivada: el audio pasa entero.
-    gate: Option<Arc<Mutex<NoiseGate>>>,
+    /// Existe siempre, incluso desactivada: apagada sólo observa, y esas
+    /// mediciones son las que permiten elegir los umbrales.
+    gate: Arc<Mutex<NoiseGate>>,
     _kill_tx: mpsc::Sender<()>,
 }
 
@@ -51,9 +52,7 @@ impl HotMic {
         let current_volume_clone = current_volume.clone();
         let audio_multiplier = Arc::new(std::sync::atomic::AtomicU32::new(initial_multiplier.to_bits()));
         let audio_multiplier_clone = audio_multiplier.clone();
-        let gate = gate_config
-            .enabled
-            .then(|| Arc::new(Mutex::new(NoiseGate::new(gate_config))));
+        let gate = Arc::new(Mutex::new(NoiseGate::new(gate_config)));
         let gate_clone = gate.clone();
         
         let (kill_tx, mut kill_rx) = mpsc::channel::<()>(1);
@@ -86,10 +85,7 @@ impl HotMic {
                                     // dejarían de valer, y peor: cambiar la ganancia
                                     // en caliente movería el umbral efectivo sin que
                                     // nadie lo pida.
-                                    let kept = match gate_clone.as_ref() {
-                                        Some(gate) => gate.lock().await.filter(raw),
-                                        None => raw.to_vec(),
-                                    };
+                                    let kept = gate_clone.lock().await.filter(raw);
                                     if !kept.is_empty() {
                                         let mut b = buffer_clone.lock().await;
                                         b.extend_from_slice(&amplify(&kept, mult));
@@ -124,9 +120,7 @@ impl HotMic {
     pub async fn start_recording(&self) {
         // La puerta se reinicia antes de habilitar la grabación: si arrancara
         // con el sostenimiento del dictado anterior, dejaría entrar el fondo.
-        if let Some(gate) = self.gate.as_ref() {
-            gate.lock().await.reset();
-        }
+        self.gate.lock().await.reset();
         let mut b = self.buffer.lock().await;
         b.clear(); // Limpiar rastro anterior obligatoriamente
         self.is_recording.store(true, Ordering::SeqCst);
@@ -138,12 +132,26 @@ impl HotMic {
         // La cola que no completó una ventana entra igual, para no cortar la
         // última consonante. Se amplifica acá porque la puerta trabaja sobre la
         // señal cruda.
-        if let Some(gate) = self.gate.as_ref() {
-            let tail = gate.lock().await.flush();
-            if !tail.is_empty() {
-                let amplified = amplify(&tail, self.get_multiplier());
-                self.buffer.lock().await.extend_from_slice(&amplified);
-            }
+        let (tail, stats) = {
+            let mut gate = self.gate.lock().await;
+            (gate.flush(), gate.take_stats())
+        };
+        if !tail.is_empty() {
+            let amplified = amplify(&tail, self.get_multiplier());
+            self.buffer.lock().await.extend_from_slice(&amplified);
+        }
+        if let Some(stats) = stats {
+            // Estos son los niveles que ve la puerta, no los de una medición
+            // hecha por fuera: son los que hay que mirar para calibrarla.
+            tracing::info!(
+                windows = stats.windows,
+                kept = stats.kept,
+                kept_pct = (100 * stats.kept) / stats.windows.max(1),
+                level_p50_dbfs = stats.p50_dbfs,
+                level_p95_dbfs = stats.p95_dbfs,
+                peak_dbfs = stats.peak_dbfs,
+                "Niveles de audio del dictado"
+            );
         }
 
         let mut b = self.buffer.lock().await;
@@ -166,9 +174,28 @@ impl HotMic {
         if !self.is_recording.swap(false, Ordering::SeqCst) {
             return None;
         }
-        if let Some(gate) = self.gate.as_ref() {
-            gate.lock().await.reset();
+
+        // Los niveles se reportan igual que en un dictado normal. Así se puede
+        // medir el ambiente —grabar, no hablar, cancelar— sin pagar la llamada
+        // a la API ni recibir una transcripción de basura.
+        let stats = {
+            let mut gate = self.gate.lock().await;
+            let stats = gate.take_stats();
+            gate.reset();
+            stats
+        };
+        if let Some(stats) = stats {
+            tracing::info!(
+                windows = stats.windows,
+                kept = stats.kept,
+                kept_pct = (100 * stats.kept) / stats.windows.max(1),
+                level_p50_dbfs = stats.p50_dbfs,
+                level_p95_dbfs = stats.p95_dbfs,
+                peak_dbfs = stats.peak_dbfs,
+                "Niveles de audio del dictado cancelado"
+            );
         }
+
         let mut b = self.buffer.lock().await;
         let discarded = b.len();
         b.clear();
